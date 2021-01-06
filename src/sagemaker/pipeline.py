@@ -20,20 +20,31 @@ from sagemaker.transformer import Transformer
 
 
 class PipelineModel(object):
-    """A pipeline of SageMaker
-    ``Model``s that can be deployed to an ``Endpoint``.
+    """A pipeline of SageMaker `Model` instances.
+
+    This pipeline can be deployed as an `Endpoint` on SageMaker.
     """
 
     def __init__(
-        self, models, role, predictor_cls=None, name=None, vpc_config=None, sagemaker_session=None
+        self,
+        models,
+        role,
+        predictor_cls=None,
+        name=None,
+        vpc_config=None,
+        sagemaker_session=None,
+        enable_network_isolation=False,
     ):
-        """Initialize an SageMaker ``Model`` which can be used to build an
-        Inference Pipeline comprising of multiple model containers.
+        """Initialize a SageMaker `Model` instance.
+
+        The `Model` can be used to build an Inference Pipeline comprising of
+        multiple model containers.
 
         Args:
             models (list[sagemaker.Model]): For using multiple containers to
-                build an inference pipeline, you can pass a list of ``sagemaker.Model`` objects
-                in the order you want the inference to happen.
+                build an inference pipeline, you can pass a list of
+                ``sagemaker.Model`` objects in the order you want the inference
+                to happen.
             role (str): An AWS IAM role (either name or full ARN). The Amazon
                 SageMaker training jobs and APIs that create Amazon SageMaker
                 endpoints use this role to access training data and model
@@ -53,6 +64,10 @@ class PipelineModel(object):
                 object, used for SageMaker interactions (default: None). If not
                 specified, one is created using the default AWS configuration
                 chain.
+            enable_network_isolation (bool): Default False. if True, enables
+                network isolation in the endpoint, isolating the model
+                container. No inbound or outbound network calls can be made to
+                or from the model container.Boolean
         """
         self.models = models
         self.role = role
@@ -60,12 +75,15 @@ class PipelineModel(object):
         self.name = name
         self.vpc_config = vpc_config
         self.sagemaker_session = sagemaker_session
-        self._model_name = None
+        self.enable_network_isolation = enable_network_isolation
         self.endpoint_name = None
 
     def pipeline_container_def(self, instance_type):
-        """Return a dict created by ``sagemaker.pipeline_container_def()`` for
-        deploying this model to a specified instance type.
+        """The pipeline definition for deploying this model.
+
+        This is the dict created by ``sagemaker.pipeline_container_def()``.
+
+        The instance type to be used may be specified.
 
         Subclasses can override this to provide custom container definitions
         for deployment to a specific instance type. Called by ``deploy()``.
@@ -86,14 +104,18 @@ class PipelineModel(object):
         self,
         initial_instance_count,
         instance_type,
+        serializer=None,
+        deserializer=None,
         endpoint_name=None,
         tags=None,
         wait=True,
         update_endpoint=False,
         data_capture_config=None,
+        kms_key=None,
     ):
-        """Deploy this ``Model`` to an ``Endpoint`` and optionally return a
-        ``Predictor``.
+        """Deploy the ``Model`` to an ``Endpoint``.
+
+        It optionally return a ``Predictor``.
 
         Create a SageMaker ``Model`` and ``EndpointConfig``, and deploy an
         ``Endpoint`` from this ``Model``. If ``self.predictor_cls`` is not None,
@@ -111,6 +133,16 @@ class PipelineModel(object):
                 in the ``Endpoint`` created from this ``Model``.
             instance_type (str): The EC2 instance type to deploy this Model to.
                 For example, 'ml.p2.xlarge'.
+            serializer (:class:`~sagemaker.serializers.BaseSerializer`): A
+                serializer object, used to encode data for an inference endpoint
+                (default: None). If ``serializer`` is not None, then
+                ``serializer`` will override the default serializer. The
+                default serializer is set by the ``predictor_cls``.
+            deserializer (:class:`~sagemaker.deserializers.BaseDeserializer`): A
+                deserializer object, used to decode data from an inference
+                endpoint (default: None). If ``deserializer`` is not None, then
+                ``deserializer`` will override the default deserializer. The
+                default deserializer is set by the ``predictor_cls``.
             endpoint_name (str): The name of the endpoint to create (default:
                 None). If not specified, a unique endpoint name will be created.
             tags (List[dict[str, str]]): The list of tags to attach to this
@@ -125,6 +157,9 @@ class PipelineModel(object):
             data_capture_config (sagemaker.model_monitor.DataCaptureConfig): Specifies
                 configuration related to Endpoint data capture for use with
                 Amazon SageMaker Model Monitoring. Default: None.
+            kms_key (str): The ARN, Key ID or Alias of the KMS key that is used to
+                encrypt the data on the storage volume attached to the instance hosting
+                the endpoint.
 
         Returns:
             callable[string, sagemaker.session.Session] or None: Invocation of
@@ -138,7 +173,11 @@ class PipelineModel(object):
 
         self.name = self.name or name_from_image(containers[0]["Image"])
         self.sagemaker_session.create_model(
-            self.name, self.role, containers, vpc_config=self.vpc_config
+            self.name,
+            self.role,
+            containers,
+            vpc_config=self.vpc_config,
+            enable_network_isolation=self.enable_network_isolation,
         )
 
         production_variant = sagemaker.production_variant(
@@ -157,6 +196,7 @@ class PipelineModel(object):
                 initial_instance_count=initial_instance_count,
                 instance_type=instance_type,
                 tags=tags,
+                kms_key=kms_key,
                 data_capture_config_dict=data_capture_config_dict,
             )
             self.sagemaker_session.update_endpoint(
@@ -167,12 +207,18 @@ class PipelineModel(object):
                 name=self.endpoint_name,
                 production_variants=[production_variant],
                 tags=tags,
+                kms_key=kms_key,
                 wait=wait,
                 data_capture_config_dict=data_capture_config_dict,
             )
 
         if self.predictor_cls:
-            return self.predictor_cls(self.endpoint_name, self.sagemaker_session)
+            predictor = self.predictor_cls(self.endpoint_name, self.sagemaker_session)
+            if serializer:
+                predictor.serializer = serializer
+            if deserializer:
+                predictor.deserializer = deserializer
+            return predictor
         return None
 
     def _create_sagemaker_pipeline_model(self, instance_type):
@@ -190,7 +236,11 @@ class PipelineModel(object):
 
         self.name = self.name or name_from_image(containers[0]["Image"])
         self.sagemaker_session.create_model(
-            self.name, self.role, containers, vpc_config=self.vpc_config
+            self.name,
+            self.role,
+            containers,
+            vpc_config=self.vpc_config,
+            enable_network_isolation=self.enable_network_isolation,
         )
 
     def transformer(
@@ -259,8 +309,9 @@ class PipelineModel(object):
         )
 
     def delete_model(self):
-        """Delete the SageMaker model backing this pipeline model. This does not
-        delete the list of SageMaker models used in multiple containers to build
+        """Delete the SageMaker model backing this pipeline model.
+
+        This does not delete the list of SageMaker models used in multiple containers to build
         the inference pipeline.
         """
 

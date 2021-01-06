@@ -21,9 +21,7 @@ from sagemaker.utils import base_name_from_image, name_from_base
 
 
 class Transformer(object):
-    """A class for handling creating and interacting with Amazon SageMaker
-    transform jobs.
-    """
+    """A class for handling creating and interacting with Amazon SageMaker transform jobs."""
 
     def __init__(
         self,
@@ -120,8 +118,9 @@ class Transformer(object):
         output_filter=None,
         join_source=None,
         experiment_config=None,
-        wait=False,
-        logs=False,
+        model_client_config=None,
+        wait=True,
+        logs=True,
     ):
         """Start a new transform job.
 
@@ -172,10 +171,14 @@ class Transformer(object):
                 Dictionary contains three optional keys,
                 'ExperimentName', 'TrialName', and 'TrialComponentDisplayName'.
                 (default: ``None``).
+            model_client_config (dict[str, str]): Model configuration.
+                Dictionary contains two optional keys,
+                'InvocationsTimeoutInSeconds', and 'InvocationsMaxRetries'.
+                (default: ``None``).
             wait (bool): Whether the call should wait until the job completes
-                (default: False).
+                (default: ``True``).
             logs (bool): Whether to show the logs produced by the job.
-                Only meaningful when wait is True (default: False).
+                Only meaningful when wait is ``True`` (default: ``True``).
         """
         local_mode = self.sagemaker_session.local_mode
         if not local_mode and not data.startswith("s3://"):
@@ -208,6 +211,7 @@ class Transformer(object):
             output_filter,
             join_source,
             experiment_config,
+            model_client_config,
         )
 
         if wait:
@@ -219,14 +223,14 @@ class Transformer(object):
 
     def _retrieve_base_name(self):
         """Placeholder docstring"""
-        image_name = self._retrieve_image_name()
+        image_uri = self._retrieve_image_uri()
 
-        if image_name:
-            return base_name_from_image(image_name)
+        if image_uri:
+            return base_name_from_image(image_uri)
 
         return self.model_name
 
-    def _retrieve_image_name(self):
+    def _retrieve_image_uri(self):
         """Placeholder docstring"""
         try:
             model_desc = self.sagemaker_session.sagemaker_client.describe_model(
@@ -256,8 +260,7 @@ class Transformer(object):
         self.latest_transform_job.wait(logs=logs)
 
     def stop_transform_job(self, wait=True):
-        """Stop latest running batch transform job.
-        """
+        """Stop latest running batch transform job."""
         self._ensure_last_transform_job()
         self.latest_transform_job.stop()
         if wait:
@@ -298,8 +301,9 @@ class Transformer(object):
 
     @classmethod
     def _prepare_init_params_from_job_description(cls, job_details):
-        """Convert the transform job description to init params that can be
-        handled by the class constructor
+        """Convert the transform job description to init params.
+
+        It can be handled by the class constructor.
 
         Args:
             job_details (dict): the returned job details from a
@@ -342,20 +346,44 @@ class _TransformJob(_Job):
         output_filter,
         join_source,
         experiment_config,
+        model_client_config,
     ):
-        """
-        Args:
-            transformer:
-            data:
-            data_type:
-            content_type:
-            compression_type:
-            split_type:
-            input_filter:
-            output_filter:
-            join_source:
-            experiment_config:
-        """
+        """Placeholder docstring"""
+
+        transform_args = cls._get_transform_args(
+            transformer,
+            data,
+            data_type,
+            content_type,
+            compression_type,
+            split_type,
+            input_filter,
+            output_filter,
+            join_source,
+            experiment_config,
+            model_client_config,
+        )
+        transformer.sagemaker_session.transform(**transform_args)
+
+        return cls(transformer.sagemaker_session, transformer._current_job_name)
+
+    @classmethod
+    def _get_transform_args(
+        cls,
+        transformer,
+        data,
+        data_type,
+        content_type,
+        compression_type,
+        split_type,
+        input_filter,
+        output_filter,
+        join_source,
+        experiment_config,
+        model_client_config,
+    ):
+        """Placeholder docstring"""
+
         config = _TransformJob._load_config(
             data, data_type, content_type, compression_type, split_type, transformer
         )
@@ -363,22 +391,23 @@ class _TransformJob(_Job):
             input_filter, output_filter, join_source
         )
 
-        transformer.sagemaker_session.transform(
-            job_name=transformer._current_job_name,
-            model_name=transformer.model_name,
-            strategy=transformer.strategy,
-            max_concurrent_transforms=transformer.max_concurrent_transforms,
-            max_payload=transformer.max_payload,
-            env=transformer.env,
-            input_config=config["input_config"],
-            output_config=config["output_config"],
-            resource_config=config["resource_config"],
-            experiment_config=experiment_config,
-            tags=transformer.tags,
-            data_processing=data_processing,
+        transform_args = config.copy()
+        transform_args.update(
+            {
+                "job_name": transformer._current_job_name,
+                "model_name": transformer.model_name,
+                "strategy": transformer.strategy,
+                "max_concurrent_transforms": transformer.max_concurrent_transforms,
+                "max_payload": transformer.max_payload,
+                "env": transformer.env,
+                "experiment_config": experiment_config,
+                "model_client_config": model_client_config,
+                "tags": transformer.tags,
+                "data_processing": data_processing,
+            }
         )
 
-        return cls(transformer.sagemaker_session, transformer._current_job_name)
+        return transform_args
 
     def wait(self, logs=True):
         if logs:
@@ -392,15 +421,7 @@ class _TransformJob(_Job):
 
     @staticmethod
     def _load_config(data, data_type, content_type, compression_type, split_type, transformer):
-        """
-        Args:
-            data:
-            data_type:
-            content_type:
-            compression_type:
-            split_type:
-            transformer:
-        """
+        """Placeholder docstring"""
         input_config = _TransformJob._format_inputs_to_input_config(
             data, data_type, content_type, compression_type, split_type
         )
@@ -424,14 +445,7 @@ class _TransformJob(_Job):
 
     @staticmethod
     def _format_inputs_to_input_config(data, data_type, content_type, compression_type, split_type):
-        """
-        Args:
-            data:
-            data_type:
-            content_type:
-            compression_type:
-            split_type:
-        """
+        """Placeholder docstring"""
         config = {"DataSource": {"S3DataSource": {"S3DataType": data_type, "S3Uri": data}}}
 
         if content_type is not None:
@@ -447,13 +461,7 @@ class _TransformJob(_Job):
 
     @staticmethod
     def _prepare_output_config(s3_path, kms_key_id, assemble_with, accept):
-        """
-        Args:
-            s3_path:
-            kms_key_id:
-            assemble_with:
-            accept:
-        """
+        """Placeholder docstring"""
         config = super(_TransformJob, _TransformJob)._prepare_output_config(s3_path, kms_key_id)
 
         if assemble_with is not None:
@@ -466,12 +474,7 @@ class _TransformJob(_Job):
 
     @staticmethod
     def _prepare_resource_config(instance_count, instance_type, volume_kms_key):
-        """
-        Args:
-            instance_count:
-            instance_type:
-            volume_kms_key:
-        """
+        """Placeholder docstring"""
         config = {"InstanceCount": instance_count, "InstanceType": instance_type}
 
         if volume_kms_key is not None:
@@ -481,12 +484,7 @@ class _TransformJob(_Job):
 
     @staticmethod
     def _prepare_data_processing(input_filter, output_filter, join_source):
-        """
-        Args:
-            input_filter:
-            output_filter:
-            join_source:
-        """
+        """Placeholder docstring"""
         config = {}
 
         if input_filter is not None:

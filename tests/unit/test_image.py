@@ -76,11 +76,11 @@ LOCAL_CODE_HYPERPARAMETERS = {
 
 @pytest.fixture()
 def sagemaker_session():
-    boto_mock = Mock(name="boto_session", region_name=REGION)
+    boto_mock = MagicMock(name="boto_session", region_name=REGION)
     boto_mock.client("sts").get_caller_identity.return_value = {"Account": "123"}
     boto_mock.resource("s3").Bucket(BUCKET_NAME).objects.filter.return_value = []
 
-    sms = sagemaker.Session(boto_session=boto_mock, sagemaker_client=Mock())
+    sms = sagemaker.Session(boto_session=boto_mock, sagemaker_client=MagicMock())
 
     sms.default_bucket = Mock(name="default_bucket", return_value=BUCKET_NAME)
     sms.expand_role = Mock(return_value=EXPANDED_ROLE)
@@ -370,7 +370,7 @@ def test_train(
             assert call_args[i] == v
 
         with open(docker_compose_file, "r") as f:
-            config = yaml.load(f)
+            config = yaml.load(f, Loader=yaml.SafeLoader)
             assert len(config["services"]) == instance_count
             for h in sagemaker_container.hosts:
                 assert config["services"][h]["image"] == image
@@ -419,7 +419,7 @@ def test_train_with_hyperparameters_without_job_name(
         )
 
         with open(docker_compose_file, "r") as f:
-            config = yaml.load(f)
+            config = yaml.load(f, Loader=yaml.SafeLoader)
             for h in sagemaker_container.hosts:
                 assert (
                     "TRAINING_JOB_NAME={}".format(TRAINING_JOB_NAME)
@@ -491,7 +491,7 @@ def test_train_local_code(get_data_source_instance, tmpdir, sagemaker_session):
         shared_folder_path = os.path.join(sagemaker_container.container_root, "shared")
 
         with open(docker_compose_file, "r") as f:
-            config = yaml.load(f)
+            config = yaml.load(f, Loader=yaml.SafeLoader)
             assert len(config["services"]) == instance_count
 
         for h in sagemaker_container.hosts:
@@ -543,7 +543,7 @@ def test_train_local_intermediate_output(get_data_source_instance, tmpdir, sagem
         intermediate_folder_path = os.path.join(output_path, "output/intermediate")
 
         with open(docker_compose_file, "r") as f:
-            config = yaml.load(f)
+            config = yaml.load(f, Loader=yaml.SafeLoader)
             assert len(config["services"]) == instance_count
             for h in sagemaker_container.hosts:
                 assert config["services"][h]["image"] == image
@@ -596,7 +596,7 @@ def test_serve(tmpdir, sagemaker_session):
         )
 
         with open(docker_compose_file, "r") as f:
-            config = yaml.load(f)
+            config = yaml.load(f, Loader=yaml.SafeLoader)
 
             for h in sagemaker_container.hosts:
                 assert config["services"][h]["image"] == image
@@ -624,7 +624,7 @@ def test_serve_local_code(tmpdir, sagemaker_session):
         )
 
         with open(docker_compose_file, "r") as f:
-            config = yaml.load(f)
+            config = yaml.load(f, Loader=yaml.SafeLoader)
 
             for h in sagemaker_container.hosts:
                 assert config["services"][h]["image"] == image
@@ -657,7 +657,7 @@ def test_serve_local_code_no_env(tmpdir, sagemaker_session):
         )
 
         with open(docker_compose_file, "r") as f:
-            config = yaml.load(f)
+            config = yaml.load(f, Loader=yaml.SafeLoader)
 
             for h in sagemaker_container.hosts:
                 assert config["services"][h]["image"] == image
@@ -765,7 +765,7 @@ def test_ecr_login_needed(check_output):
         "docker login -u AWS -p %s https://520713654638.dkr.ecr.us-east-1.amazonaws.com" % token
     )
 
-    check_output.assert_called_with(expected_command, shell=True)
+    check_output.assert_called_with(expected_command.split())
     session_mock.client("ecr").get_authorization_token.assert_called_with(
         registryIds=["520713654638"]
     )
@@ -781,7 +781,7 @@ def test_pull_image(check_output):
 
     expected_command = "docker pull %s" % image
 
-    check_output.assert_called_once_with(expected_command, shell=True)
+    check_output.assert_called_once_with(expected_command.split())
 
 
 def test__aws_credentials_with_long_lived_credentials():
@@ -799,7 +799,7 @@ def test__aws_credentials_with_long_lived_credentials():
 
 @patch("sagemaker.local.image._aws_credentials_available_in_metadata_service")
 def test__aws_credentials_with_short_lived_credentials_and_ec2_metadata_service_having_credentials(
-    mock
+    mock,
 ):
     credentials = Credentials(
         access_key=_random_string(), secret_key=_random_string(), token=_random_string()
@@ -814,7 +814,7 @@ def test__aws_credentials_with_short_lived_credentials_and_ec2_metadata_service_
 
 @patch("sagemaker.local.image._aws_credentials_available_in_metadata_service")
 def test__aws_credentials_with_short_lived_credentials_and_ec2_metadata_service_having_no_credentials(
-    mock
+    mock,
 ):
     credentials = Credentials(
         access_key=_random_string(), secret_key=_random_string(), token=_random_string()

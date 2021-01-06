@@ -13,18 +13,25 @@
 """Placeholder docstring"""
 from __future__ import absolute_import
 
-from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase, registry
-from sagemaker.amazon.common import numpy_to_record_serializer, record_deserializer
+from sagemaker import image_uris
+from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase
+from sagemaker.amazon.common import RecordSerializer, RecordDeserializer
 from sagemaker.amazon.hyperparameter import Hyperparameter as hp  # noqa
 from sagemaker.amazon.validation import ge, isin
-from sagemaker.predictor import RealTimePredictor
+from sagemaker.predictor import Predictor
 from sagemaker.model import Model
 from sagemaker.session import Session
 from sagemaker.vpc_utils import VPC_CONFIG_DEFAULT
 
 
 class KNN(AmazonAlgorithmEstimatorBase):
-    """Placeholder docstring"""
+    """An index-based algorithm. It uses a non-parametric method for classification or regression.
+
+    For classification problems, the algorithm queries the k points that are closest to the sample
+    point and returns the most frequently used label of their class as the predicted label. For
+    regression problems, the algorithm queries the k closest points to the sample point and returns
+    the average of their feature values as the predicted value.
+    """
 
     repo_name = "knn"
     repo_version = 1
@@ -63,11 +70,11 @@ class KNN(AmazonAlgorithmEstimatorBase):
     def __init__(
         self,
         role,
-        train_instance_count,
-        train_instance_type,
-        k,
-        sample_size,
-        predictor_type,
+        instance_count=None,
+        instance_type=None,
+        k=None,
+        sample_size=None,
+        predictor_type=None,
         dimension_reduction_type=None,
         dimension_reduction_target=None,
         index_type=None,
@@ -76,8 +83,9 @@ class KNN(AmazonAlgorithmEstimatorBase):
         faiss_index_pq_m=None,
         **kwargs
     ):
-        """k-nearest neighbors (KNN) is :class:`Estimator` used for
-        classification and regression. This Estimator may be fit via calls to
+        """k-nearest neighbors (KNN) is :class:`Estimator` used for classification and regression.
+
+        This Estimator may be fit via calls to
         :meth:`~sagemaker.amazon.amazon_estimator.AmazonAlgorithmEstimatorBase.fit`.
         It requires Amazon :class:`~sagemaker.amazon.record_pb2.Record` protobuf
         serialized data to be stored in S3. There is an utility
@@ -105,8 +113,8 @@ class KNN(AmazonAlgorithmEstimatorBase):
                 endpoints use this role to access training data and model
                 artifacts. After the endpoint is created, the inference code
                 might use the IAM role, if accessing AWS resource.
-            train_instance_count:
-            train_instance_type (str): Type of EC2 instance to use for training,
+            instance_count:
+            instance_type (str): Type of EC2 instance to use for training,
                 for example, 'ml.c4.xlarge'.
             k (int): Required. Number of nearest neighbors.
             sample_size (int): Required. Number of data points to be sampled
@@ -136,7 +144,7 @@ class KNN(AmazonAlgorithmEstimatorBase):
             :class:`~sagemaker.estimator.EstimatorBase`.
         """
 
-        super(KNN, self).__init__(role, train_instance_count, train_instance_type, **kwargs)
+        super(KNN, self).__init__(role, instance_count, instance_type, **kwargs)
         self.k = k
         self.sample_size = sample_size
         self.predictor_type = predictor_type
@@ -152,8 +160,9 @@ class KNN(AmazonAlgorithmEstimatorBase):
             )
 
     def create_model(self, vpc_config_override=VPC_CONFIG_DEFAULT, **kwargs):
-        """Return a :class:`~sagemaker.amazon.KNNModel` referencing the latest
-        s3 model data produced by this Estimator.
+        """Return a :class:`~sagemaker.amazon.KNNModel`.
+
+        It references the latest s3 model data produced by this Estimator.
 
         Args:
             vpc_config_override (dict[str, list[str]]): Optional override for VpcConfig set on
@@ -171,68 +180,91 @@ class KNN(AmazonAlgorithmEstimatorBase):
         )
 
     def _prepare_for_training(self, records, mini_batch_size=None, job_name=None):
-        """
-        Args:
-            records:
-            mini_batch_size:
-            job_name:
-        """
+        """Placeholder docstring"""
         super(KNN, self)._prepare_for_training(
             records, mini_batch_size=mini_batch_size, job_name=job_name
         )
 
 
-class KNNPredictor(RealTimePredictor):
+class KNNPredictor(Predictor):
     """Performs classification or regression prediction from input vectors.
 
     The implementation of
-    :meth:`~sagemaker.predictor.RealTimePredictor.predict` in this
-    `RealTimePredictor` requires a numpy ``ndarray`` as input. The array should
+    :meth:`~sagemaker.predictor.Predictor.predict` in this
+    `Predictor` requires a numpy ``ndarray`` as input. The array should
     contain the same number of columns as the feature-dimension of the data used
     to fit the model this Predictor performs inference on.
 
     :func:`predict` returns a list of
-    :class:`~sagemaker.amazon.record_pb2.Record` objects, one for each row in
+    :class:`~sagemaker.amazon.record_pb2.Record` objects (assuming the default
+    recordio-protobuf ``deserializer`` is used), one for each row in
     the input ``ndarray``. The prediction is stored in the ``"predicted_label"``
     key of the ``Record.label`` field.
     """
 
-    def __init__(self, endpoint, sagemaker_session=None):
-        """
+    def __init__(
+        self,
+        endpoint_name,
+        sagemaker_session=None,
+        serializer=RecordSerializer(),
+        deserializer=RecordDeserializer(),
+    ):
+        """Function to initialize KNNPredictor.
+
         Args:
-            endpoint:
-            sagemaker_session:
+            endpoint_name (str): Name of the Amazon SageMaker endpoint to which
+                requests are sent.
+            sagemaker_session (sagemaker.session.Session): A SageMaker Session
+                object, used for SageMaker interactions (default: None). If not
+                specified, one is created using the default AWS configuration
+                chain.
+            serializer (sagemaker.serializers.BaseSerializer): Optional. Default
+                serializes input data to x-recordio-protobuf format.
+            deserializer (sagemaker.deserializers.BaseDeserializer): Optional.
+                Default parses responses from x-recordio-protobuf format.
         """
         super(KNNPredictor, self).__init__(
-            endpoint,
+            endpoint_name,
             sagemaker_session,
-            serializer=numpy_to_record_serializer(),
-            deserializer=record_deserializer(),
+            serializer=serializer,
+            deserializer=deserializer,
         )
 
 
 class KNNModel(Model):
-    """Reference S3 model data created by KNN estimator. Calling
-    :meth:`~sagemaker.model.Model.deploy` creates an Endpoint and returns
-    :class:`KNNPredictor`.
+    """Reference S3 model data created by KNN estimator.
+
+    Calling :meth:`~sagemaker.model.Model.deploy` creates an Endpoint
+    and returns :class:`KNNPredictor`.
     """
 
     def __init__(self, model_data, role, sagemaker_session=None, **kwargs):
-        """
+        """Function to initialize KNNModel.
+
         Args:
-            model_data:
-            role:
-            sagemaker_session:
-            **kwargs:
+            model_data (str): The S3 location of a SageMaker model data
+                ``.tar.gz`` file.
+            role (str): An AWS IAM role (either name or full ARN). The Amazon
+                SageMaker training jobs and APIs that create Amazon SageMaker
+                endpoints use this role to access training data and model
+                artifacts. After the endpoint is created, the inference code
+                might use the IAM role, if it needs to access an AWS resource.
+            sagemaker_session (sagemaker.session.Session): Session object which
+                manages interactions with Amazon SageMaker APIs and any other
+                AWS services needed. If not specified, the estimator creates one
+                using the default AWS configuration chain.
+            **kwargs: Keyword arguments passed to the ``FrameworkModel``
+                initializer.
         """
         sagemaker_session = sagemaker_session or Session()
-        repo = "{}:{}".format(KNN.repo_name, KNN.repo_version)
-        image = "{}/{}".format(
-            registry(sagemaker_session.boto_session.region_name, KNN.repo_name), repo
+        image_uri = image_uris.retrieve(
+            KNN.repo_name,
+            sagemaker_session.boto_region_name,
+            version=KNN.repo_version,
         )
         super(KNNModel, self).__init__(
+            image_uri,
             model_data,
-            image,
             role,
             predictor_cls=KNNPredictor,
             sagemaker_session=sagemaker_session,

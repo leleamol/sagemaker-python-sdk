@@ -1,7 +1,3 @@
-.. important::
-    We are working on v2.0.0. See https://github.com/aws/sagemaker-python-sdk/issues/1459
-    for more info on our plans and to leave feedback!
-
 ###########################
 Amazon SageMaker Python SDK
 ###########################
@@ -20,6 +16,7 @@ Overview
     :maxdepth: 2
 
     overview
+    v2
 
 The SageMaker Python SDK APIs:
 
@@ -53,15 +50,14 @@ Amazon SageMaker provides implementations of some common machine learning algori
 
 
 *************
-Orchestration
+Workflows
 *************
-Orchestrate your SageMaker training and inference jobs with Kubernetes and Airflow.
+Orchestrate your SageMaker training and inference workflows with Airflow and Kubernetes.
 
 .. toctree::
-    :maxdepth: 1
+    :maxdepth: 2
 
-    kubernetes/index
-    airflow/index
+    workflows/index
 
 
 *************************
@@ -70,9 +66,20 @@ Amazon SageMaker Debugger
 You can use Amazon SageMaker Debugger to automatically detect anomalies while training your machine learning models.
 
 .. toctree::
-    :maxdepth: 2
+   :maxdepth: 2
 
-    amazon_sagemaker_debugger
+   amazon_sagemaker_debugger
+
+
+******************************
+Amazon SageMaker Feature Store
+******************************
+You can use Feature Store to store features and associated metadata, so features can be discovered and reused.
+
+.. toctree::
+   :maxdepth: 2
+
+   amazon_sagemaker_featurestore
 
 
 *********************************

@@ -76,21 +76,24 @@ confidence=
 # --disable=W"
 disable=
     C0330, # Black disagrees with and explicitly violates this: https://github.com/python/black/issues/48
-    too-many-locals,
-    arguments-differ,
-    too-many-lines,
-    fixme,
-    too-many-arguments,
-    invalid-name,
-    too-many-instance-attributes,
-    len-as-condition, # TODO: Enable this check once pylint 2.4.0 is released and consumed due to the fix in https://github.com/PyCQA/pylint/issues/2684
-    import-error, # Since we run Pylint before any of our builds in tox, this will always fail
-    protected-access, # TODO: Fix access
     abstract-method, # TODO: Fix abstract methods
-    useless-object-inheritance, # TODO: Enable this check and fix code once Python 2 is no longer supported.
+    arguments-differ,
     cyclic-import, # TODO: Resolve cyclic imports
+    fixme,
+    invalid-name,
+    import-error, # Since we run Pylint before any of our builds in tox, this will always fail
+    import-outside-toplevel,
     no-self-use, # TODO: Convert methods to functions where appropriate
+    protected-access, # TODO: Fix access
+    signature-differs,  # TODO: fix kwargs
+    too-many-arguments,
     too-many-branches, # TODO: Simplify or ignore as appropriate
+    too-many-instance-attributes,
+    too-many-lines,
+    too-many-locals,
+    useless-object-inheritance, # TODO: Enable this check and fix code once Python 2 is no longer supported.
+    super-with-arguments,
+    raise-missing-from,
 
 [REPORTS]
 # Set the output format. Available formats are text, parseable, colorized, msvs
@@ -289,7 +292,7 @@ spelling-dict=
 spelling-ignore-words=
 
 # A path to a file that contains private dictionary; one word per line.
-spelling-private-dict-file=
+spelling-private-dict-file=.dictionary
 
 # Tells whether to store unknown words to indicated private dictionary in
 # --spelling-private-dict-file option instead of raising a message.
@@ -311,7 +314,7 @@ ignored-modules=distutils
 # List of class names for which member attributes should not be checked (useful
 # for classes with dynamically set attributes). This supports the use of
 # qualified names.
-ignored-classes=optparse.Values,thread._local,_thread._local,matplotlib.cm,tensorflow.python,tensorflow,tensorflow.train.Example,RunOptions
+ignored-classes=optparse.Values,thread._local,_thread._local,matplotlib.cm,tensorflow.python,tensorflow,tensorflow.train.Example,RunOptions,sagemaker.workflow.properties.Properties
 
 # List of members which are set dynamically and missed by pylint inference
 # system, and so shouldn't trigger E1101 when accessed. Python regular

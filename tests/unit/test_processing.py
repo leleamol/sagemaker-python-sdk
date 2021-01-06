@@ -15,6 +15,12 @@ from __future__ import absolute_import
 import pytest
 from mock import Mock, patch, MagicMock
 
+from sagemaker.dataset_definition.inputs import (
+    S3Input,
+    DatasetDefinition,
+    AthenaDatasetDefinition,
+    RedshiftDatasetDefinition,
+)
 from sagemaker.processing import (
     ProcessingInput,
     ProcessingOutput,
@@ -24,52 +30,13 @@ from sagemaker.processing import (
 )
 from sagemaker.sklearn.processing import SKLearnProcessor
 from sagemaker.network import NetworkConfig
+from sagemaker.processing import FeatureStoreOutput
 
 BUCKET_NAME = "mybucket"
 REGION = "us-west-2"
 ROLE = "arn:aws:iam::012345678901:role/SageMakerRole"
-ECR_PREFIX = "246618743249.dkr.ecr.us-west-2.amazonaws.com"
+ECR_HOSTNAME = "ecr.us-west-2.amazonaws.com"
 CUSTOM_IMAGE_URI = "012345678901.dkr.ecr.us-west-2.amazonaws.com/my-custom-image-uri"
-
-PROCESSING_JOB_DESCRIPTION = {
-    "ProcessingInputs": [
-        {
-            "InputName": "my_dataset",
-            "S3Input": {
-                "S3Uri": "s3://path/to/my/dataset/census.csv",
-                "LocalPath": "/container/path/",
-                "S3DataType": "S3Prefix",
-                "S3InputMode": "File",
-                "S3DataDistributionType": "FullyReplicated",
-                "S3CompressionType": "None",
-            },
-        },
-        {
-            "InputName": "code",
-            "S3Input": {
-                "S3Uri": "mocked_s3_uri_from_upload_data",
-                "LocalPath": "/opt/ml/processing/input/code",
-                "S3DataType": "S3Prefix",
-                "S3InputMode": "File",
-                "S3DataDistributionType": "FullyReplicated",
-                "S3CompressionType": "None",
-            },
-        },
-    ],
-    "ProcessingOutputConfig": {
-        "Outputs": [
-            {
-                "OutputName": "my_output",
-                "S3Output": {
-                    "S3Uri": "s3://uri/",
-                    "LocalPath": "/container/path/",
-                    "S3UploadMode": "EndOfJob",
-                },
-            }
-        ],
-        "KmsKeyId": "arn:aws:kms:us-west-2:012345678901:key/output-kms-key",
-    },
-}
 
 
 @pytest.fixture()
@@ -90,21 +57,23 @@ def sagemaker_session():
     session_mock.download_data = Mock(name="download_data")
     session_mock.expand_role.return_value = ROLE
     session_mock.describe_processing_job = MagicMock(
-        name="describe_processing_job", return_value=PROCESSING_JOB_DESCRIPTION
+        name="describe_processing_job", return_value=_get_describe_response_inputs_and_ouputs()
     )
     return session_mock
 
 
-@patch("sagemaker.fw_registry.get_ecr_image_uri_prefix", return_value=ECR_PREFIX)
+@patch("sagemaker.utils._botocore_resolver")
 @patch("os.path.exists", return_value=True)
 @patch("os.path.isfile", return_value=True)
 def test_sklearn_processor_with_required_parameters(
-    exists_mock, isfile_mock, ecr_prefix, sagemaker_session
+    exists_mock, isfile_mock, botocore_resolver, sagemaker_session, sklearn_version
 ):
+    botocore_resolver.return_value.construct_endpoint.return_value = {"hostname": ECR_HOSTNAME}
+
     processor = SKLearnProcessor(
         role=ROLE,
         instance_type="ml.m4.xlarge",
-        framework_version="0.20.0",
+        framework_version=sklearn_version,
         instance_count=1,
         sagemaker_session=sagemaker_session,
     )
@@ -114,20 +83,24 @@ def test_sklearn_processor_with_required_parameters(
     expected_args = _get_expected_args(processor._current_job_name)
 
     sklearn_image_uri = (
-        "246618743249.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:0.20.0-cpu-py3"
-    )
+        "246618743249.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:{}-cpu-py3"
+    ).format(sklearn_version)
     expected_args["app_specification"]["ImageUri"] = sklearn_image_uri
 
     sagemaker_session.process.assert_called_with(**expected_args)
 
 
-@patch("sagemaker.fw_registry.get_ecr_image_uri_prefix", return_value=ECR_PREFIX)
+@patch("sagemaker.utils._botocore_resolver")
 @patch("os.path.exists", return_value=True)
 @patch("os.path.isfile", return_value=True)
-def test_sklearn_with_all_parameters(exists_mock, isfile_mock, ecr_prefix, sagemaker_session):
+def test_sklearn_with_all_parameters(
+    exists_mock, isfile_mock, botocore_resolver, sklearn_version, sagemaker_session
+):
+    botocore_resolver.return_value.construct_endpoint.return_value = {"hostname": ECR_HOSTNAME}
+
     processor = SKLearnProcessor(
         role=ROLE,
-        framework_version="0.20.0",
+        framework_version=sklearn_version,
         instance_type="ml.m4.xlarge",
         instance_count=1,
         volume_size_in_gb=100,
@@ -148,25 +121,8 @@ def test_sklearn_with_all_parameters(exists_mock, isfile_mock, ecr_prefix, sagem
 
     processor.run(
         code="/local/path/to/processing_code.py",
-        inputs=[
-            ProcessingInput(
-                source="s3://path/to/my/dataset/census.csv",
-                destination="/container/path/",
-                input_name="my_dataset",
-                s3_data_type="S3Prefix",
-                s3_input_mode="File",
-                s3_data_distribution_type="FullyReplicated",
-                s3_compression_type="None",
-            )
-        ],
-        outputs=[
-            ProcessingOutput(
-                source="/container/path/",
-                destination="s3://uri/",
-                output_name="my_output",
-                s3_upload_mode="EndOfJob",
-            )
-        ],
+        inputs=_get_data_inputs_all_parameters(),
+        outputs=_get_data_outputs_all_parameters(),
         arguments=["--drop-columns", "'SelfEmployed'"],
         wait=True,
         logs=False,
@@ -176,26 +132,11 @@ def test_sklearn_with_all_parameters(exists_mock, isfile_mock, ecr_prefix, sagem
 
     expected_args = _get_expected_args_all_parameters(processor._current_job_name)
     sklearn_image_uri = (
-        "246618743249.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:0.20.0-cpu-py3"
-    )
+        "246618743249.dkr.ecr.us-west-2.amazonaws.com/sagemaker-scikit-learn:{}-cpu-py3"
+    ).format(sklearn_version)
     expected_args["app_specification"]["ImageUri"] = sklearn_image_uri
 
     sagemaker_session.process.assert_called_with(**expected_args)
-
-
-@patch("os.path.exists", return_value=True)
-@patch("os.path.isfile", return_value=True)
-def test_sklearn_processor_errors_with_invalid_framework_version(
-    exists_mock, isfile_mock, sagemaker_session
-):
-    with pytest.raises(ValueError):
-        SKLearnProcessor(
-            role=ROLE,
-            framework_version="0.21.0",
-            instance_type="ml.m4.xlarge",
-            instance_count=1,
-            sagemaker_session=sagemaker_session,
-        )
 
 
 @patch("os.path.exists", return_value=False)
@@ -338,25 +279,8 @@ def test_script_processor_with_all_parameters(exists_mock, isfile_mock, sagemake
 
     processor.run(
         code="/local/path/to/processing_code.py",
-        inputs=[
-            ProcessingInput(
-                source="s3://path/to/my/dataset/census.csv",
-                destination="/container/path/",
-                input_name="my_dataset",
-                s3_data_type="S3Prefix",
-                s3_input_mode="File",
-                s3_data_distribution_type="FullyReplicated",
-                s3_compression_type="None",
-            )
-        ],
-        outputs=[
-            ProcessingOutput(
-                source="/container/path/",
-                destination="s3://uri/",
-                output_name="my_output",
-                s3_upload_mode="EndOfJob",
-            )
-        ],
+        inputs=_get_data_inputs_all_parameters(),
+        outputs=_get_data_outputs_all_parameters(),
         arguments=["--drop-columns", "'SelfEmployed'"],
         wait=True,
         logs=False,
@@ -455,25 +379,8 @@ def test_processor_with_all_parameters(sagemaker_session):
     )
 
     processor.run(
-        inputs=[
-            ProcessingInput(
-                source="s3://path/to/my/dataset/census.csv",
-                destination="/container/path/",
-                input_name="my_dataset",
-                s3_data_type="S3Prefix",
-                s3_input_mode="File",
-                s3_data_distribution_type="FullyReplicated",
-                s3_compression_type="None",
-            )
-        ],
-        outputs=[
-            ProcessingOutput(
-                source="/container/path/",
-                destination="s3://uri/",
-                output_name="my_output",
-                s3_upload_mode="EndOfJob",
-            )
-        ],
+        inputs=_get_data_inputs_all_parameters(),
+        outputs=_get_data_outputs_all_parameters(),
         arguments=["--drop-columns", "'SelfEmployed'"],
         wait=True,
         logs=False,
@@ -483,7 +390,7 @@ def test_processor_with_all_parameters(sagemaker_session):
 
     expected_args = _get_expected_args_all_parameters(processor._current_job_name)
     # Drop the "code" input from expected values.
-    expected_args["inputs"] = [expected_args["inputs"][0]]
+    expected_args["inputs"] = expected_args["inputs"][:-1]
 
     sagemaker_session.process.assert_called_with(**expected_args)
 
@@ -493,17 +400,37 @@ def test_processing_job_from_processing_arn(sagemaker_session):
         sagemaker_session=sagemaker_session,
         processing_job_arn="arn:aws:sagemaker:dummy-region:dummy-account-number:processing-job/dummy-job-name",
     )
+
     assert isinstance(processing_job, ProcessingJob)
     assert [
         processing_input._to_request_dict() for processing_input in processing_job.inputs
-    ] == PROCESSING_JOB_DESCRIPTION["ProcessingInputs"]
+    ] == _get_describe_response_inputs_and_ouputs()["ProcessingInputs"]
     assert [
         processing_output._to_request_dict() for processing_output in processing_job.outputs
-    ] == PROCESSING_JOB_DESCRIPTION["ProcessingOutputConfig"]["Outputs"]
+    ] == _get_describe_response_inputs_and_ouputs()["ProcessingOutputConfig"]["Outputs"]
     assert (
         processing_job.output_kms_key
-        == PROCESSING_JOB_DESCRIPTION["ProcessingOutputConfig"]["KmsKeyId"]
+        == _get_describe_response_inputs_and_ouputs()["ProcessingOutputConfig"]["KmsKeyId"]
     )
+
+
+def test_extend_processing_args(sagemaker_session):
+    inputs = []
+    outputs = []
+
+    processor = Processor(
+        role=ROLE,
+        image_uri=CUSTOM_IMAGE_URI,
+        instance_count=1,
+        instance_type="ml.m4.xlarge",
+        sagemaker_session=sagemaker_session,
+        network_config=NetworkConfig(encrypt_inter_container_traffic=False),
+    )
+
+    extended_inputs, extended_outputs = processor._extend_processing_args([], [])
+
+    assert extended_inputs == inputs
+    assert extended_outputs == outputs
 
 
 def _get_script_processor(sagemaker_session):
@@ -522,6 +449,7 @@ def _get_expected_args(job_name, code_s3_uri="mocked_s3_uri_from_upload_data"):
         "inputs": [
             {
                 "InputName": "code",
+                "AppManaged": False,
                 "S3Input": {
                     "S3Uri": code_s3_uri,
                     "LocalPath": "/opt/ml/processing/input/code",
@@ -557,6 +485,7 @@ def _get_expected_args(job_name, code_s3_uri="mocked_s3_uri_from_upload_data"):
 def _get_data_input():
     data_input = {
         "InputName": "input-1",
+        "AppManaged": False,
         "S3Input": {
             "S3Uri": "mocked_s3_uri_from_upload_data",
             "LocalPath": "/data/",
@@ -569,11 +498,92 @@ def _get_data_input():
     return data_input
 
 
+def _get_data_inputs_all_parameters():
+    return [
+        ProcessingInput(
+            source="s3://path/to/my/dataset/census.csv",
+            destination="/container/path/",
+            input_name="my_dataset",
+            s3_data_type="S3Prefix",
+            s3_input_mode="File",
+            s3_data_distribution_type="FullyReplicated",
+            s3_compression_type="None",
+        ),
+        ProcessingInput(
+            input_name="s3_input",
+            s3_input=S3Input(
+                s3_uri="s3://path/to/my/dataset/census.csv",
+                local_path="/container/path/",
+                s3_data_type="S3Prefix",
+                s3_input_mode="File",
+                s3_data_distribution_type="FullyReplicated",
+                s3_compression_type="None",
+            ),
+        ),
+        ProcessingInput(
+            input_name="redshift_dataset_definition",
+            app_managed=True,
+            dataset_definition=DatasetDefinition(
+                local_path="/opt/ml/processing/input/dd",
+                data_distribution_type="FullyReplicated",
+                input_mode="File",
+                redshift_dataset_definition=RedshiftDatasetDefinition(
+                    cluster_id="cluster_id",
+                    database="database",
+                    db_user="db_user",
+                    query_string="query_string",
+                    cluster_role_arn="cluster_role_arn",
+                    output_s3_uri="output_s3_uri",
+                    kms_key_id="kms_key_id",
+                    output_format="CSV",
+                    output_compression="SNAPPY",
+                ),
+            ),
+        ),
+        ProcessingInput(
+            input_name="athena_dataset_definition",
+            app_managed=True,
+            dataset_definition=DatasetDefinition(
+                local_path="/opt/ml/processing/input/dd",
+                data_distribution_type="FullyReplicated",
+                input_mode="File",
+                athena_dataset_definition=AthenaDatasetDefinition(
+                    catalog="catalog",
+                    database="database",
+                    work_group="workgroup",
+                    query_string="query_string",
+                    output_s3_uri="output_s3_uri",
+                    kms_key_id="kms_key_id",
+                    output_format="AVRO",
+                    output_compression="ZLIB",
+                ),
+            ),
+        ),
+    ]
+
+
+def _get_data_outputs_all_parameters():
+    return [
+        ProcessingOutput(
+            source="/container/path/",
+            destination="s3://uri/",
+            output_name="my_output",
+            s3_upload_mode="EndOfJob",
+        ),
+        ProcessingOutput(
+            output_name="feature_store_output",
+            app_managed=True,
+            feature_store_output=FeatureStoreOutput(feature_group_name="FeatureGroupName"),
+        ),
+    ]
+
+
 def _get_expected_args_all_parameters(job_name):
     return {
         "inputs": [
             {
                 "InputName": "my_dataset",
+                "AppManaged": False,
                 "S3Input": {
                     "S3Uri": "s3://path/to/my/dataset/census.csv",
                     "LocalPath": "/container/path/",
@@ -584,7 +594,59 @@ def _get_expected_args_all_parameters(job_name):
                 },
             },
             {
+                "InputName": "s3_input",
+                "AppManaged": False,
+                "S3Input": {
+                    "S3Uri": "s3://path/to/my/dataset/census.csv",
+                    "LocalPath": "/container/path/",
+                    "S3DataType": "S3Prefix",
+                    "S3InputMode": "File",
+                    "S3DataDistributionType": "FullyReplicated",
+                    "S3CompressionType": "None",
+                },
+            },
+            {
+                "InputName": "redshift_dataset_definition",
+                "AppManaged": True,
+                "DatasetDefinition": {
+                    "DataDistributionType": "FullyReplicated",
+                    "InputMode": "File",
+                    "LocalPath": "/opt/ml/processing/input/dd",
+                    "RedshiftDatasetDefinition": {
+                        "ClusterId": "cluster_id",
+                        "Database": "database",
+                        "DbUser": "db_user",
+                        "QueryString": "query_string",
+                        "ClusterRoleArn": "cluster_role_arn",
+                        "OutputS3Uri": "output_s3_uri",
+                        "KmsKeyId": "kms_key_id",
+                        "OutputFormat": "CSV",
+                        "OutputCompression": "SNAPPY",
+                    },
+                },
+            },
+            {
+                "InputName": "athena_dataset_definition",
+                "AppManaged": True,
+                "DatasetDefinition": {
+                    "DataDistributionType": "FullyReplicated",
+                    "InputMode": "File",
+                    "LocalPath": "/opt/ml/processing/input/dd",
+                    "AthenaDatasetDefinition": {
+                        "Catalog": "catalog",
+                        "Database": "database",
+                        "QueryString": "query_string",
+                        "OutputS3Uri": "output_s3_uri",
+                        "WorkGroup": "workgroup",
+                        "KmsKeyId": "kms_key_id",
+                        "OutputFormat": "AVRO",
+                        "OutputCompression": "ZLIB",
+                    },
+                },
+            },
+            {
                 "InputName": "code",
+                "AppManaged": False,
                 "S3Input": {
                     "S3Uri": "mocked_s3_uri_from_upload_data",
                     "LocalPath": "/opt/ml/processing/input/code",
@@ -599,12 +661,18 @@ def _get_expected_args_all_parameters(job_name):
             "Outputs": [
                 {
                     "OutputName": "my_output",
+                    "AppManaged": False,
                     "S3Output": {
                         "S3Uri": "s3://uri/",
                         "LocalPath": "/container/path/",
                         "S3UploadMode": "EndOfJob",
                     },
-                }
+                },
+                {
+                    "OutputName": "feature_store_output",
+                    "AppManaged": True,
+                    "FeatureStoreOutput": {"FeatureGroupName": "FeatureGroupName"},
+                },
             ],
             "KmsKeyId": "arn:aws:kms:us-west-2:012345678901:key/output-kms-key",
         },
@@ -635,4 +703,11 @@ def _get_expected_args_all_parameters(job_name):
         "role_arn": ROLE,
         "tags": [{"Key": "my-tag", "Value": "my-tag-value"}],
         "experiment_config": {"ExperimentName": "AnExperiment"},
+    }
+
+
+def _get_describe_response_inputs_and_ouputs():
+    return {
+        "ProcessingInputs": _get_expected_args_all_parameters(None)["inputs"],
+        "ProcessingOutputConfig": _get_expected_args_all_parameters(None)["output_config"],
     }

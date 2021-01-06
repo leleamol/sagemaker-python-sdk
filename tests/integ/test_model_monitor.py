@@ -36,7 +36,7 @@ from sagemaker.model_monitor.data_capture_config import _DATA_CAPTURE_S3_PATH
 from sagemaker.model_monitor import CronExpressionGenerator
 from sagemaker.processing import ProcessingInput
 from sagemaker.processing import ProcessingOutput
-from sagemaker.tensorflow.serving import Model
+from sagemaker.tensorflow.model import TensorFlowModel
 from sagemaker.utils import unique_name_from_base
 
 from tests.integ.kms_utils import get_or_create_kms_key
@@ -45,8 +45,8 @@ from tests.integ.retry import retries
 ROLE = "SageMakerRole"
 INSTANCE_COUNT = 1
 INSTANCE_TYPE = "ml.m5.xlarge"
-VOLUME_SIZE_IN_GB = 40
-MAX_RUNTIME_IN_SECONDS = 45 * 60
+VOLUME_SIZE_IN_GB = 30
+MAX_RUNTIME_IN_SECONDS = 60 * 60
 ENV_KEY_1 = "env_key_1"
 ENV_VALUE_1 = "env_key_1"
 ENVIRONMENT = {ENV_KEY_1: ENV_VALUE_1}
@@ -56,9 +56,6 @@ TAGS = [{"Key": TAG_KEY_1, "Value": TAG_VALUE_1}]
 NETWORK_CONFIG = NetworkConfig(enable_network_isolation=True)
 ENABLE_CLOUDWATCH_METRICS = True
 
-DEFAULT_INSTANCE_TYPE = "ml.m5.xlarge"
-DEFAULT_INSTANCE_COUNT = 1
-DEFAULT_VOLUME_SIZE_IN_GB = 30
 DEFAULT_BASELINING_MAX_RUNTIME_IN_SECONDS = 86400
 DEFAULT_EXECUTION_MAX_RUNTIME_IN_SECONDS = 3600
 DEFAULT_IMAGE_SUFFIX = "/sagemaker-model-monitor-analyzer"
@@ -84,11 +81,11 @@ CUSTOM_JSON_CONTENT_TYPES = ["application/jsontype1", "application/jsontype2"]
 
 INTEG_TEST_MONITORING_OUTPUT_BUCKET = "integ-test-monitoring-output-bucket"
 
-FIVE_MINUTE_CRON_EXPRESSION = "cron(0/5 * ? * * *)"
+FIVE_MIN_CRON_EXPRESSION = "cron(0/5 * ? * * *)"
 
 
 @pytest.fixture(scope="module")
-def predictor(sagemaker_session, tf_serving_version):
+def predictor(sagemaker_session, tensorflow_inference_latest_version):
     endpoint_name = unique_name_from_base("sagemaker-tensorflow-serving")
     model_data = sagemaker_session.upload_data(
         path=os.path.join(tests.integ.DATA_DIR, "tensorflow-serving-test-model.tar.gz"),
@@ -97,10 +94,10 @@ def predictor(sagemaker_session, tf_serving_version):
     with tests.integ.timeout.timeout_and_delete_endpoint_by_name(
         endpoint_name=endpoint_name, sagemaker_session=sagemaker_session, hours=2
     ):
-        model = Model(
+        model = TensorFlowModel(
             model_data=model_data,
             role=ROLE,
-            framework_version=tf_serving_version,
+            framework_version=tensorflow_inference_latest_version,
             sagemaker_session=sagemaker_session,
         )
         predictor = model.deploy(
@@ -146,11 +143,11 @@ def default_monitoring_schedule_name(sagemaker_session, output_kms_key, volume_k
     )
 
     my_default_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output_s3_uri=output_s3_uri,
         statistics=statistics,
         constraints=constraints,
-        schedule_cron_expression=FIVE_MINUTE_CRON_EXPRESSION,
+        schedule_cron_expression=FIVE_MIN_CRON_EXPRESSION,
         enable_cloudwatch_metrics=ENABLE_CLOUDWATCH_METRICS,
     )
 
@@ -206,11 +203,11 @@ def byoc_monitoring_schedule_name(sagemaker_session, output_kms_key, volume_kms_
     )
 
     my_byoc_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output=MonitoringOutput(source="/opt/ml/processing/output", destination=output_s3_uri),
         statistics=statistics,
         constraints=constraints,
-        schedule_cron_expression=FIVE_MINUTE_CRON_EXPRESSION,
+        schedule_cron_expression=FIVE_MIN_CRON_EXPRESSION,
     )
 
     _wait_for_schedule_changes_to_apply(monitor=my_byoc_monitor)
@@ -365,7 +362,7 @@ def test_default_monitor_suggest_baseline_and_create_monitoring_schedule_with_cu
     constraints.save()
 
     my_default_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output_s3_uri=output_s3_uri,
         statistics=my_default_monitor.baseline_statistics(),
         constraints=my_default_monitor.suggested_constraints(),
@@ -374,99 +371,14 @@ def test_default_monitor_suggest_baseline_and_create_monitoring_schedule_with_cu
     )
 
     schedule_description = my_default_monitor.describe_schedule()
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
-        == CronExpressionGenerator.daily()
-    )
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeKmsKeyId"]
-        == volume_kms_key
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ]["KmsKeyId"]
-        == output_kms_key
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["StatisticsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["ConstraintsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            ENV_KEY_1
-        ]
-        == ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Enabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "NetworkConfig"
-        ]["EnableNetworkIsolation"]
-        == NETWORK_CONFIG.enable_network_isolation
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        statistics=my_default_monitor.baseline_statistics(),
+        constraints=my_default_monitor.suggested_constraints(),
+        volume_kms_key=volume_kms_key,
+        output_kms_key=output_kms_key,
+        network_config=NETWORK_CONFIG,
     )
 
     summary = sagemaker_session.list_monitoring_schedules()
@@ -494,15 +406,15 @@ def test_default_monitor_suggest_baseline_and_create_monitoring_schedule_without
 
     assert (
         baselining_job_description["ProcessingResources"]["ClusterConfig"]["InstanceType"]
-        == DEFAULT_INSTANCE_TYPE
+        == INSTANCE_TYPE
     )
     assert (
         baselining_job_description["ProcessingResources"]["ClusterConfig"]["InstanceCount"]
-        == DEFAULT_INSTANCE_COUNT
+        == INSTANCE_COUNT
     )
     assert (
         baselining_job_description["ProcessingResources"]["ClusterConfig"]["VolumeSizeInGB"]
-        == DEFAULT_VOLUME_SIZE_IN_GB
+        == VOLUME_SIZE_IN_GB
     )
     assert (
         baselining_job_description["ProcessingResources"]["ClusterConfig"].get("VolumeKmsKeyId")
@@ -546,104 +458,15 @@ def test_default_monitor_suggest_baseline_and_create_monitoring_schedule_without
     constraints.save()
 
     my_default_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint, schedule_cron_expression=CronExpressionGenerator.daily()
+        endpoint_input=predictor.endpoint_name,
+        schedule_cron_expression=CronExpressionGenerator.daily(),
     )
     schedule_description = my_default_monitor.describe_schedule()
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == DEFAULT_INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == DEFAULT_INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == DEFAULT_VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"].get("VolumeKmsKeyId")
-        is None
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ].get("RecordPreprocessorSourceUri")
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ].get("PostAnalyticsProcessorSourceUri")
-        is None
-    )
-    assert (
-        ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ].get("KmsKeyId")
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "BaselineConfig"
-        )
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "BaselineConfig"
-        )
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "Environment"
-        ].get(ENV_KEY_1)
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Enabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "NetworkConfig"
-        )
-        is None
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        statistics=statistics,
+        constraints=constraints,
     )
 
     summary = sagemaker_session.list_monitoring_schedules()
@@ -690,7 +513,7 @@ def test_default_monitor_create_stop_and_start_monitoring_schedule_with_customiz
     )
 
     my_default_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output_s3_uri=output_s3_uri,
         statistics=statistics,
         constraints=constraints,
@@ -699,100 +522,14 @@ def test_default_monitor_create_stop_and_start_monitoring_schedule_with_customiz
     )
 
     schedule_description = my_default_monitor.describe_schedule()
-
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
-        == CronExpressionGenerator.daily()
-    )
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeKmsKeyId"]
-        == volume_kms_key
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ]["KmsKeyId"]
-        == output_kms_key
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["StatisticsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["ConstraintsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            ENV_KEY_1
-        ]
-        == ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Enabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "NetworkConfig"
-        ]["EnableNetworkIsolation"]
-        == NETWORK_CONFIG.enable_network_isolation
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        statistics=statistics,
+        constraints=constraints,
+        output_kms_key=output_kms_key,
+        volume_kms_key=volume_kms_key,
+        network_config=NETWORK_CONFIG,
     )
 
     _wait_for_schedule_changes_to_apply(monitor=my_default_monitor)
@@ -860,7 +597,7 @@ def test_default_monitor_create_and_update_schedule_config_with_customizations(
     )
 
     my_default_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output_s3_uri=output_s3_uri,
         statistics=statistics,
         constraints=constraints,
@@ -869,100 +606,14 @@ def test_default_monitor_create_and_update_schedule_config_with_customizations(
     )
 
     schedule_description = my_default_monitor.describe_schedule()
-
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
-        == CronExpressionGenerator.daily()
-    )
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeKmsKeyId"]
-        == volume_kms_key
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ]["KmsKeyId"]
-        == output_kms_key
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["StatisticsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["ConstraintsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            ENV_KEY_1
-        ]
-        == ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Enabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "NetworkConfig"
-        ]["EnableNetworkIsolation"]
-        == NETWORK_CONFIG.enable_network_isolation
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        statistics=statistics,
+        constraints=constraints,
+        output_kms_key=output_kms_key,
+        volume_kms_key=volume_kms_key,
+        network_config=NETWORK_CONFIG,
     )
 
     statistics = Statistics.from_file_path(
@@ -997,100 +648,22 @@ def test_default_monitor_create_and_update_schedule_config_with_customizations(
     _wait_for_schedule_changes_to_apply(my_default_monitor)
 
     schedule_description = my_default_monitor.describe_schedule()
-
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
-        == CronExpressionGenerator.hourly()
-    )
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == UPDATED_INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == UPDATED_INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == UPDATED_VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeKmsKeyId"]
-        == updated_volume_kms_key
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        UPDATED_ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ]["KmsKeyId"]
-        == updated_output_kms_key
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["StatisticsResource"]["S3Uri"]
-        == statistics.file_s3_uri
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["ConstraintsResource"]["S3Uri"]
-        == constraints.file_s3_uri
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == UPDATED_MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            UPDATED_ENV_KEY_1
-        ]
-        == UPDATED_ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Disabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "NetworkConfig"
-        ]["EnableNetworkIsolation"]
-        == UPDATED_NETWORK_CONFIG.enable_network_isolation
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        statistics=statistics,
+        constraints=constraints,
+        output_kms_key=updated_output_kms_key,
+        volume_kms_key=updated_volume_kms_key,
+        cron_expression=CronExpressionGenerator.hourly(),
+        instant_count=UPDATED_INSTANCE_COUNT,
+        instant_type=UPDATED_INSTANCE_TYPE,
+        volume_size_in_gb=UPDATED_VOLUME_SIZE_IN_GB,
+        network_config=UPDATED_NETWORK_CONFIG,
+        max_runtime_in_seconds=UPDATED_MAX_RUNTIME_IN_SECONDS,
+        publish_cloudwatch_metrics="Disabled",
+        env_key=UPDATED_ENV_KEY_1,
+        env_value=UPDATED_ENV_VALUE_1,
     )
 
     _wait_for_schedule_changes_to_apply(monitor=my_default_monitor)
@@ -1112,106 +685,14 @@ def test_default_monitor_create_and_update_schedule_config_without_customization
     my_default_monitor = DefaultModelMonitor(role=ROLE, sagemaker_session=sagemaker_session)
 
     my_default_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint, schedule_cron_expression=CronExpressionGenerator.daily()
+        endpoint_input=predictor.endpoint_name,
+        schedule_cron_expression=CronExpressionGenerator.daily(),
     )
 
     schedule_description = my_default_monitor.describe_schedule()
-
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == DEFAULT_INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == DEFAULT_INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == DEFAULT_VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"].get("VolumeKmsKeyId")
-        is None
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ].get("RecordPreprocessorSourceUri")
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ].get("PostAnalyticsProcessorSourceUri")
-        is None
-    )
-    assert (
-        ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ].get("KmsKeyId")
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "BaselineConfig"
-        )
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "BaselineConfig"
-        )
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "Environment"
-        ].get(ENV_KEY_1)
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Enabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "NetworkConfig"
-        )
-        is None
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
     )
 
     _wait_for_schedule_changes_to_apply(my_default_monitor)
@@ -1221,102 +702,9 @@ def test_default_monitor_create_and_update_schedule_config_without_customization
     _wait_for_schedule_changes_to_apply(my_default_monitor)
 
     schedule_description = my_default_monitor.describe_schedule()
-
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == DEFAULT_INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == DEFAULT_INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == DEFAULT_VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"].get("VolumeKmsKeyId")
-        is None
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ].get("RecordPreprocessorSourceUri")
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ].get("PostAnalyticsProcessorSourceUri")
-        is None
-    )
-    assert (
-        ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ].get("KmsKeyId")
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "BaselineConfig"
-        )
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "BaselineConfig"
-        )
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "Environment"
-        ].get(ENV_KEY_1)
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Enabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "NetworkConfig"
-        )
-        is None
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
     )
 
     _wait_for_schedule_changes_to_apply(monitor=my_default_monitor)
@@ -1330,6 +718,7 @@ def test_default_monitor_create_and_update_schedule_config_without_customization
     tests.integ.test_region() in tests.integ.NO_MODEL_MONITORING_REGIONS,
     reason="ModelMonitoring is not yet supported in this region.",
 )
+@pytest.mark.cron
 def test_default_monitor_attach_followed_by_baseline_and_update_monitoring_schedule(
     sagemaker_session,
     default_monitoring_schedule_name,
@@ -1379,100 +768,23 @@ def test_default_monitor_attach_followed_by_baseline_and_update_monitoring_sched
     _wait_for_schedule_changes_to_apply(my_attached_monitor)
 
     schedule_description = my_attached_monitor.describe_schedule()
-
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
-        == CronExpressionGenerator.hourly()
-    )
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == UPDATED_INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == UPDATED_INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == UPDATED_VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeKmsKeyId"]
-        == updated_volume_kms_key
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        UPDATED_ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ]["KmsKeyId"]
-        == updated_output_kms_key
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["StatisticsResource"]["S3Uri"]
-        == statistics.file_s3_uri
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["ConstraintsResource"]["S3Uri"]
-        == constraints.file_s3_uri
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == UPDATED_MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            UPDATED_ENV_KEY_1
-        ]
-        == UPDATED_ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Disabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "NetworkConfig"
-        ]["EnableNetworkIsolation"]
-        == UPDATED_NETWORK_CONFIG.enable_network_isolation
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        cron_expression=CronExpressionGenerator.hourly(),
+        statistics=statistics,
+        constraints=constraints,
+        instant_count=UPDATED_INSTANCE_COUNT,
+        instant_type=UPDATED_INSTANCE_TYPE,
+        volume_size_in_gb=UPDATED_VOLUME_SIZE_IN_GB,
+        volume_kms_key=updated_volume_kms_key,
+        output_kms_key=updated_output_kms_key,
+        max_runtime_in_seconds=UPDATED_MAX_RUNTIME_IN_SECONDS,
+        env_key=UPDATED_ENV_KEY_1,
+        env_value=UPDATED_ENV_VALUE_1,
+        publish_cloudwatch_metrics="Disabled",
+        network_config=UPDATED_NETWORK_CONFIG,
+        role=UPDATED_ROLE,
     )
 
     _wait_for_schedule_changes_to_apply(monitor=my_attached_monitor)
@@ -1486,6 +798,7 @@ def test_default_monitor_attach_followed_by_baseline_and_update_monitoring_sched
     tests.integ.test_region() in tests.integ.NO_MODEL_MONITORING_REGIONS,
     reason="ModelMonitoring is not yet supported in this region.",
 )
+@pytest.mark.cron
 def test_default_monitor_monitoring_execution_interactions(
     sagemaker_session, default_monitoring_schedule_name
 ):
@@ -1505,7 +818,7 @@ def test_default_monitor_monitoring_execution_interactions(
     desired_s3_uri = os.path.join(executions[-1].output.destination, file_name)
 
     S3Uploader.upload_string_as_file_body(
-        body=file_body, desired_s3_uri=desired_s3_uri, session=sagemaker_session
+        body=file_body, desired_s3_uri=desired_s3_uri, sagemaker_session=sagemaker_session
     )
 
     statistics = my_attached_monitor.latest_monitoring_statistics()
@@ -1518,7 +831,7 @@ def test_default_monitor_monitoring_execution_interactions(
     desired_s3_uri = os.path.join(executions[-1].output.destination, file_name)
 
     S3Uploader.upload_string_as_file_body(
-        body=file_body, desired_s3_uri=desired_s3_uri, session=sagemaker_session
+        body=file_body, desired_s3_uri=desired_s3_uri, sagemaker_session=sagemaker_session
     )
 
     constraint_violations = my_attached_monitor.latest_monitoring_constraint_violations()
@@ -1630,7 +943,7 @@ def test_byoc_monitor_suggest_baseline_and_create_monitoring_schedule_with_custo
     constraints.save()
 
     my_byoc_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output=MonitoringOutput(source="/opt/ml/processing/output", destination=output_s3_uri),
         statistics=my_byoc_monitor.baseline_statistics(),
         constraints=my_byoc_monitor.suggested_constraints(),
@@ -1638,99 +951,15 @@ def test_byoc_monitor_suggest_baseline_and_create_monitoring_schedule_with_custo
     )
 
     schedule_description = my_byoc_monitor.describe_schedule()
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
-        == CronExpressionGenerator.daily()
-    )
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeKmsKeyId"]
-        == volume_kms_key
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ]["KmsKeyId"]
-        == output_kms_key
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["StatisticsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["ConstraintsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            ENV_KEY_1
-        ]
-        == ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Disabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "NetworkConfig"
-        ]["EnableNetworkIsolation"]
-        == NETWORK_CONFIG.enable_network_isolation
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        statistics=my_byoc_monitor.baseline_statistics(),
+        constraints=my_byoc_monitor.suggested_constraints(),
+        volume_kms_key=volume_kms_key,
+        output_kms_key=output_kms_key,
+        publish_cloudwatch_metrics="Disabled",
+        network_config=NETWORK_CONFIG,
     )
 
     _wait_for_schedule_changes_to_apply(monitor=my_byoc_monitor)
@@ -1789,15 +1018,15 @@ def test_byoc_monitor_suggest_baseline_and_create_monitoring_schedule_without_cu
 
     assert (
         baselining_job_description["ProcessingResources"]["ClusterConfig"]["InstanceCount"]
-        == DEFAULT_INSTANCE_COUNT
+        == INSTANCE_COUNT
     )
     assert (
         baselining_job_description["ProcessingResources"]["ClusterConfig"]["InstanceType"]
-        == DEFAULT_INSTANCE_TYPE
+        == INSTANCE_TYPE
     )
     assert (
         baselining_job_description["ProcessingResources"]["ClusterConfig"]["VolumeSizeInGB"]
-        == DEFAULT_VOLUME_SIZE_IN_GB
+        == VOLUME_SIZE_IN_GB
     )
     assert (
         baselining_job_description["ProcessingResources"]["ClusterConfig"].get("VolumeKmsKeyId")
@@ -1836,95 +1065,17 @@ def test_byoc_monitor_suggest_baseline_and_create_monitoring_schedule_without_cu
     constraints.save()
 
     my_byoc_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output=MonitoringOutput(source="/opt/ml/processing/output", destination=output_s3_uri),
         schedule_cron_expression=CronExpressionGenerator.daily(),
     )
 
     schedule_description = my_byoc_monitor.describe_schedule()
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == DEFAULT_INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == DEFAULT_INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == DEFAULT_VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"].get("VolumeKmsKeyId")
-        is None
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ].get("KmsKeyId")
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "BaselineConfig"
-        )
-        is None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == DEFAULT_EXECUTION_MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            ENV_KEY_1
-        ]
-        == ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Disabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"].get(
-            "NetworkConfig"
-        )
-        is None
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        max_runtime_in_seconds=DEFAULT_EXECUTION_MAX_RUNTIME_IN_SECONDS,
+        publish_cloudwatch_metrics="Disabled",
     )
 
     _wait_for_schedule_changes_to_apply(monitor=my_byoc_monitor)
@@ -1990,7 +1141,7 @@ def test_byoc_monitor_create_and_update_schedule_config_with_customizations(
     )
 
     my_byoc_monitor.create_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output=MonitoringOutput(source="/opt/ml/processing/output", destination=output_s3_uri),
         statistics=statistics,
         constraints=constraints,
@@ -1998,99 +1149,15 @@ def test_byoc_monitor_create_and_update_schedule_config_with_customizations(
     )
 
     schedule_description = my_byoc_monitor.describe_schedule()
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
-        == CronExpressionGenerator.daily()
-    )
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeKmsKeyId"]
-        == volume_kms_key
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ]["KmsKeyId"]
-        == output_kms_key
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["StatisticsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["ConstraintsResource"]["S3Uri"]
-        is not None
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            ENV_KEY_1
-        ]
-        == ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Disabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "NetworkConfig"
-        ]["EnableNetworkIsolation"]
-        == NETWORK_CONFIG.enable_network_isolation
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        statistics=statistics,
+        constraints=constraints,
+        volume_kms_key=volume_kms_key,
+        output_kms_key=output_kms_key,
+        publish_cloudwatch_metrics="Disabled",
+        network_config=NETWORK_CONFIG,
     )
 
     _wait_for_schedule_changes_to_apply(my_byoc_monitor)
@@ -2098,7 +1165,7 @@ def test_byoc_monitor_create_and_update_schedule_config_with_customizations(
     byoc_env.update(UPDATED_ENVIRONMENT)
 
     my_byoc_monitor.update_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output=MonitoringOutput(source="/opt/ml/processing/output", destination=output_s3_uri),
         statistics=statistics,
         constraints=constraints,
@@ -2117,100 +1184,23 @@ def test_byoc_monitor_create_and_update_schedule_config_with_customizations(
     _wait_for_schedule_changes_to_apply(my_byoc_monitor)
 
     schedule_description = my_byoc_monitor.describe_schedule()
-
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
-        == CronExpressionGenerator.hourly()
-    )
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == UPDATED_INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == UPDATED_INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == UPDATED_VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeKmsKeyId"]
-        == updated_volume_kms_key
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        UPDATED_ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ]["KmsKeyId"]
-        == updated_output_kms_key
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["StatisticsResource"]["S3Uri"]
-        == statistics.file_s3_uri
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["ConstraintsResource"]["S3Uri"]
-        == constraints.file_s3_uri
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == UPDATED_MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            UPDATED_ENV_KEY_1
-        ]
-        == UPDATED_ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Disabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "NetworkConfig"
-        ]["EnableNetworkIsolation"]
-        == UPDATED_NETWORK_CONFIG.enable_network_isolation
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        cron_expression=CronExpressionGenerator.hourly(),
+        statistics=statistics,
+        constraints=constraints,
+        instant_count=UPDATED_INSTANCE_COUNT,
+        instant_type=UPDATED_INSTANCE_TYPE,
+        volume_size_in_gb=UPDATED_VOLUME_SIZE_IN_GB,
+        volume_kms_key=updated_volume_kms_key,
+        output_kms_key=updated_output_kms_key,
+        publish_cloudwatch_metrics="Disabled",
+        max_runtime_in_seconds=UPDATED_MAX_RUNTIME_IN_SECONDS,
+        env_key=UPDATED_ENV_KEY_1,
+        env_value=UPDATED_ENV_VALUE_1,
+        network_config=UPDATED_NETWORK_CONFIG,
+        role=UPDATED_ROLE,
     )
 
     _wait_for_schedule_changes_to_apply(monitor=my_byoc_monitor)
@@ -2226,6 +1216,7 @@ def test_byoc_monitor_create_and_update_schedule_config_with_customizations(
     tests.integ.test_region() in tests.integ.NO_MODEL_MONITORING_REGIONS,
     reason="ModelMonitoring is not yet supported in this region.",
 )
+@pytest.mark.cron
 def test_byoc_monitor_attach_followed_by_baseline_and_update_monitoring_schedule(
     sagemaker_session,
     predictor,
@@ -2322,7 +1313,7 @@ def test_byoc_monitor_attach_followed_by_baseline_and_update_monitoring_schedule
     byoc_env.update(UPDATED_ENVIRONMENT)
 
     my_attached_monitor.update_monitoring_schedule(
-        endpoint_input=predictor.endpoint,
+        endpoint_input=predictor.endpoint_name,
         output=MonitoringOutput(source="/opt/ml/processing/output", destination=output_s3_uri),
         statistics=statistics,
         constraints=constraints,
@@ -2341,100 +1332,23 @@ def test_byoc_monitor_attach_followed_by_baseline_and_update_monitoring_schedule
     _wait_for_schedule_changes_to_apply(my_attached_monitor)
 
     schedule_description = my_attached_monitor.describe_schedule()
-
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
-        == CronExpressionGenerator.hourly()
-    )
-    assert (
-        "sagemaker-tensorflow-serving"
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringInputs"
-        ][0]["EndpointInput"]["EndpointName"]
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceCount"]
-        == UPDATED_INSTANCE_COUNT
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["InstanceType"]
-        == UPDATED_INSTANCE_TYPE
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeSizeInGB"]
-        == UPDATED_VOLUME_SIZE_IN_GB
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringResources"
-        ]["ClusterConfig"]["VolumeKmsKeyId"]
-        == updated_volume_kms_key
-    )
-    assert (
-        DEFAULT_IMAGE_SUFFIX
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringAppSpecification"
-        ]["ImageUri"]
-    )
-    assert (
-        UPDATED_ROLE
-        in schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["RoleArn"]
-    )
-    assert (
-        len(
-            schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-                "MonitoringOutputConfig"
-            ]["MonitoringOutputs"]
-        )
-        == 1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "MonitoringOutputConfig"
-        ]["KmsKeyId"]
-        == updated_output_kms_key
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["StatisticsResource"]["S3Uri"]
-        == statistics.file_s3_uri
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "BaselineConfig"
-        ]["ConstraintsResource"]["S3Uri"]
-        == constraints.file_s3_uri
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "StoppingCondition"
-        ]["MaxRuntimeInSeconds"]
-        == UPDATED_MAX_RUNTIME_IN_SECONDS
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            UPDATED_ENV_KEY_1
-        ]
-        == UPDATED_ENV_VALUE_1
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]["Environment"][
-            "publish_cloudwatch_metrics"
-        ]
-        == "Disabled"
-    )
-    assert (
-        schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"][
-            "NetworkConfig"
-        ]["EnableNetworkIsolation"]
-        == UPDATED_NETWORK_CONFIG.enable_network_isolation
+    _verify_default_monitoring_schedule(
+        sagemaker_session=sagemaker_session,
+        schedule_description=schedule_description,
+        cron_expression=CronExpressionGenerator.hourly(),
+        statistics=statistics,
+        constraints=constraints,
+        instant_count=UPDATED_INSTANCE_COUNT,
+        instant_type=UPDATED_INSTANCE_TYPE,
+        volume_size_in_gb=UPDATED_VOLUME_SIZE_IN_GB,
+        volume_kms_key=updated_volume_kms_key,
+        output_kms_key=updated_output_kms_key,
+        publish_cloudwatch_metrics="Disabled",
+        max_runtime_in_seconds=UPDATED_MAX_RUNTIME_IN_SECONDS,
+        env_key=UPDATED_ENV_KEY_1,
+        env_value=UPDATED_ENV_VALUE_1,
+        network_config=UPDATED_NETWORK_CONFIG,
+        role=UPDATED_ROLE,
     )
 
     _wait_for_schedule_changes_to_apply(monitor=my_attached_monitor)
@@ -2448,6 +1362,7 @@ def test_byoc_monitor_attach_followed_by_baseline_and_update_monitoring_schedule
     tests.integ.test_region() in tests.integ.NO_MODEL_MONITORING_REGIONS,
     reason="ModelMonitoring is not yet supported in this region.",
 )
+@pytest.mark.cron
 def test_byoc_monitor_monitoring_execution_interactions(
     sagemaker_session, byoc_monitoring_schedule_name
 ):
@@ -2467,7 +1382,7 @@ def test_byoc_monitor_monitoring_execution_interactions(
     desired_s3_uri = os.path.join(executions[-1].output.destination, file_name)
 
     S3Uploader.upload_string_as_file_body(
-        body=file_body, desired_s3_uri=desired_s3_uri, session=sagemaker_session
+        body=file_body, desired_s3_uri=desired_s3_uri, sagemaker_session=sagemaker_session
     )
 
     statistics = my_attached_monitor.latest_monitoring_statistics()
@@ -2480,7 +1395,7 @@ def test_byoc_monitor_monitoring_execution_interactions(
     desired_s3_uri = os.path.join(executions[-1].output.destination, file_name)
 
     S3Uploader.upload_string_as_file_body(
-        body=file_body, desired_s3_uri=desired_s3_uri, session=sagemaker_session
+        body=file_body, desired_s3_uri=desired_s3_uri, sagemaker_session=sagemaker_session
     )
 
     constraint_violations = my_attached_monitor.latest_monitoring_constraint_violations()
@@ -2543,7 +1458,7 @@ def _upload_captured_data_to_endpoint(sagemaker_session, predictor):
         sagemaker_session.default_bucket(),
         _MODEL_MONITOR_S3_PATH,
         _DATA_CAPTURE_S3_PATH,
-        predictor.endpoint,
+        predictor.endpoint_name,
         "AllTraffic",
     )
     s3_uri_previous_hour = os.path.join(s3_uri_base, previous_hour_folder_structure)
@@ -2551,10 +1466,102 @@ def _upload_captured_data_to_endpoint(sagemaker_session, predictor):
     S3Uploader.upload(
         local_path=os.path.join(DATA_DIR, "monitor/captured-data.jsonl"),
         desired_s3_uri=s3_uri_previous_hour,
-        session=sagemaker_session,
+        sagemaker_session=sagemaker_session,
     )
     S3Uploader.upload(
         local_path=os.path.join(DATA_DIR, "monitor/captured-data.jsonl"),
         desired_s3_uri=s3_uri_current_hour,
-        session=sagemaker_session,
+        sagemaker_session=sagemaker_session,
     )
+
+
+def _verify_default_monitoring_schedule(
+    sagemaker_session,
+    schedule_description,
+    cron_expression=CronExpressionGenerator.daily(),
+    statistics=None,
+    constraints=None,
+    output_kms_key=None,
+    volume_kms_key=None,
+    instant_count=INSTANCE_COUNT,
+    instant_type=INSTANCE_TYPE,
+    volume_size_in_gb=VOLUME_SIZE_IN_GB,
+    network_config=None,
+    max_runtime_in_seconds=MAX_RUNTIME_IN_SECONDS,
+    publish_cloudwatch_metrics="Enabled",
+    env_key=ENV_KEY_1,
+    env_value=ENV_VALUE_1,
+    preprocessor=None,
+    postprocessor=None,
+    role=ROLE,
+):
+    assert (
+        schedule_description["MonitoringScheduleConfig"]["ScheduleConfig"]["ScheduleExpression"]
+        == cron_expression
+    )
+    assert schedule_description["MonitoringType"] == "DataQuality"
+    job_definition_name = schedule_description["MonitoringScheduleConfig"].get(
+        "MonitoringJobDefinitionName"
+    )
+    if job_definition_name:
+        job_desc = sagemaker_session.sagemaker_client.describe_data_quality_job_definition(
+            JobDefinitionName=job_definition_name,
+        )
+        # app specification
+        app_specification = job_desc["DataQualityAppSpecification"]
+        env = app_specification["Environment"]
+        baseline_config = job_desc.get("DataQualityBaselineConfig")
+        job_input = job_desc["DataQualityJobInput"]
+        job_output_config = job_desc["DataQualityJobOutputConfig"]
+        client_config = job_desc["JobResources"]["ClusterConfig"]
+    else:
+        job_desc = schedule_description["MonitoringScheduleConfig"]["MonitoringJobDefinition"]
+        app_specification = job_desc["MonitoringAppSpecification"]
+        env = job_desc["Environment"]
+        baseline_config = job_desc.get("BaselineConfig")
+        job_input = job_desc["MonitoringInputs"][0]
+        job_output_config = job_desc["MonitoringOutputConfig"]
+        client_config = job_desc["MonitoringResources"]["ClusterConfig"]
+
+    assert DEFAULT_IMAGE_SUFFIX in app_specification["ImageUri"]
+    if env.get(env_key):
+        assert env[env_key] == env_value
+    assert env["publish_cloudwatch_metrics"] == publish_cloudwatch_metrics
+    assert app_specification.get("RecordPreprocessorSourceUri") == preprocessor
+    assert app_specification.get("PostAnalyticsProcessorSourceUri") == postprocessor
+
+    # baseline
+    if baseline_config:
+        if baseline_config["StatisticsResource"]:
+            assert baseline_config["StatisticsResource"]["S3Uri"] == statistics.file_s3_uri
+        else:
+            assert statistics is None
+        if baseline_config["ConstraintsResource"]:
+            assert baseline_config["ConstraintsResource"]["S3Uri"] == constraints.file_s3_uri
+        else:
+            assert constraints is None
+    else:
+        assert statistics is None
+        assert constraints is None
+    # job input
+    assert "sagemaker-tensorflow-serving" in job_input["EndpointInput"]["EndpointName"]
+    # job output config
+    assert len(job_output_config["MonitoringOutputs"]) == 1
+    assert job_output_config.get("KmsKeyId") == output_kms_key
+    # job resources
+    assert client_config["InstanceCount"] == instant_count
+    assert client_config["InstanceType"] == instant_type
+    assert client_config["VolumeSizeInGB"] == volume_size_in_gb
+    assert client_config.get("VolumeKmsKeyId") == volume_kms_key
+    # role
+    assert role in job_desc["RoleArn"]
+    # stop condition
+    assert job_desc["StoppingCondition"]["MaxRuntimeInSeconds"] == max_runtime_in_seconds
+    # network config
+    if job_desc.get("NetworkConfig"):
+        assert (
+            job_desc["NetworkConfig"].get("EnableNetworkIsolation")
+            == network_config.enable_network_isolation
+        )
+    else:
+        assert network_config is None

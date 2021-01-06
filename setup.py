@@ -15,7 +15,6 @@ from __future__ import absolute_import
 
 import os
 from glob import glob
-import sys
 
 from setuptools import setup, find_packages
 
@@ -34,12 +33,13 @@ def read_version():
 
 # Declare minimal set for installation
 required_packages = [
-    "boto3>=1.13.6",
+    "attrs",
+    "boto3>=1.16.32",
+    "google-pasta",
     "numpy>=1.9.0",
     "protobuf>=3.1",
-    "scipy>=0.19.0",
     "protobuf3-to-dict>=0.1.5",
-    "smdebug-rulesconfig==0.1.2",
+    "smdebug_rulesconfig==1.0.1",
     "importlib-metadata>=1.4.0",
     "packaging>=20.0",
 ]
@@ -47,12 +47,13 @@ required_packages = [
 # Specific use case dependencies
 extras = {
     "analytics": ["pandas"],
+    "feature-store": ["pandas"],
     "local": [
-        "urllib3>=1.21.1,<1.26,!=1.25.0,!=1.25.1",
+        "urllib3>=1.21.1,!=1.25,!=1.25.1",
         "docker-compose>=1.25.2",
         "PyYAML>=5.3, <6",  # PyYAML version has to match docker-compose requirements
     ],
-    "tensorflow": ["tensorflow>=1.3.0"],
+    "scipy": ["scipy>=0.19.0"],
 }
 # Meta dependency groups
 extras["all"] = [item for group in extras.values() for item in group]
@@ -60,26 +61,23 @@ extras["all"] = [item for group in extras.values() for item in group]
 extras["test"] = (
     [
         extras["all"],
-        "tox==3.13.1",
+        "tox",
         "flake8",
-        "pytest==4.4.1",
+        "pytest<6.1.0",
         "pytest-cov",
         "pytest-rerunfailures",
         "pytest-xdist",
         "mock",
         "contextlib2",
         "awslogs",
-        "black==19.3b0 ; python_version >= '3.6'",
+        "black",
         "stopit==1.1.2",
-        "apache-airflow==1.10.5",
+        "apache-airflow==1.10.11",
         "fabric>=2.0",
         "requests>=2.20.0, <3",
+        "sagemaker-experiments",
     ],
 )
-
-# enum is introduced in Python 3.4. Installing enum back port
-if sys.version_info < (3, 4):
-    required_packages.append("enum34>=1.1.6")
 
 setup(
     name="sagemaker",
@@ -88,6 +86,7 @@ setup(
     packages=find_packages("src"),
     package_dir={"": "src"},
     py_modules=[os.path.splitext(os.path.basename(path))[0] for path in glob("src/*.py")],
+    include_package_data=True,
     long_description=read("README.rst"),
     author="Amazon Web Services",
     url="https://github.com/aws/sagemaker-python-sdk/",
@@ -99,12 +98,15 @@ setup(
         "Natural Language :: English",
         "License :: OSI Approved :: Apache Software License",
         "Programming Language :: Python",
-        "Programming Language :: Python :: 2.7",
         "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
     ],
     install_requires=required_packages,
     extras_require=extras,
-    entry_points={"console_scripts": ["sagemaker=sagemaker.cli.main:main"]},
-    include_package_data=True,  # TODO-reinvent-2019 [knakad]: Remove after rule_configs is in PyPI
+    entry_points={
+        "console_scripts": [
+            "sagemaker-upgrade-v2=sagemaker.cli.compatibility.v2.sagemaker_upgrade_v2:main",
+        ]
+    },
 )

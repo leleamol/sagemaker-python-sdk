@@ -19,7 +19,7 @@ from sagemaker.transformer import _TransformJob, Transformer
 from tests.integ import test_local_mode
 
 MODEL_NAME = "model"
-IMAGE_NAME = "image-for-model"
+IMAGE_URI = "image-for-model"
 JOB_NAME = "job"
 
 INSTANCE_COUNT = 1
@@ -40,9 +40,9 @@ INIT_PARAMS = {
     "base_transform_job_name": JOB_NAME,
 }
 
-MODEL_DESC_PRIMARY_CONTAINER = {"PrimaryContainer": {"Image": IMAGE_NAME}}
+MODEL_DESC_PRIMARY_CONTAINER = {"PrimaryContainer": {"Image": IMAGE_URI}}
 
-MODEL_DESC_CONTAINERS_ONLY = {"Containers": [{"Image": IMAGE_NAME}]}
+MODEL_DESC_CONTAINERS_ONLY = {"Containers": [{"Image": IMAGE_URI}]}
 
 
 @pytest.fixture(autouse=True)
@@ -167,6 +167,7 @@ def test_transform_with_all_params(start_new_job, transformer):
         "TrialName": "t",
         "TrialComponentDisplayName": "tc",
     }
+    model_client_config = {"InvocationsTimeoutInSeconds": 60, "InvocationsMaxRetries": 2}
 
     transformer.transform(
         DATA,
@@ -179,6 +180,7 @@ def test_transform_with_all_params(start_new_job, transformer):
         output_filter=output_filter,
         join_source=join_source,
         experiment_config=experiment_config,
+        model_client_config=model_client_config,
     )
 
     assert transformer._current_job_name == JOB_NAME
@@ -194,6 +196,7 @@ def test_transform_with_all_params(start_new_job, transformer):
         output_filter,
         join_source,
         experiment_config,
+        model_client_config,
     )
 
 
@@ -212,33 +215,33 @@ def test_transform_with_base_job_name_provided(start_new_job, name_from_base, tr
     assert transformer._current_job_name == full_name
 
 
-@patch("sagemaker.transformer.Transformer._retrieve_base_name", return_value=IMAGE_NAME)
+@patch("sagemaker.transformer.Transformer._retrieve_base_name", return_value=IMAGE_URI)
 @patch("sagemaker.transformer.name_from_base")
 @patch("sagemaker.transformer._TransformJob.start_new")
 def test_transform_with_base_name(start_new_job, name_from_base, retrieve_base_name, transformer):
-    full_name = "{}-{}".format(IMAGE_NAME, TIMESTAMP)
+    full_name = "{}-{}".format(IMAGE_URI, TIMESTAMP)
     name_from_base.return_value = full_name
 
     transformer.transform(DATA)
 
     retrieve_base_name.assert_called_once_with()
-    name_from_base.assert_called_once_with(IMAGE_NAME)
+    name_from_base.assert_called_once_with(IMAGE_URI)
     assert transformer._current_job_name == full_name
 
 
-@patch("sagemaker.transformer.Transformer._retrieve_image_name", return_value=IMAGE_NAME)
+@patch("sagemaker.transformer.Transformer._retrieve_image_uri", return_value=IMAGE_URI)
 @patch("sagemaker.transformer.name_from_base")
 @patch("sagemaker.transformer._TransformJob.start_new")
 def test_transform_with_job_name_based_on_image(
-    start_new_job, name_from_base, retrieve_image_name, transformer
+    start_new_job, name_from_base, retrieve_image_uri, transformer
 ):
-    full_name = "{}-{}".format(IMAGE_NAME, TIMESTAMP)
+    full_name = "{}-{}".format(IMAGE_URI, TIMESTAMP)
     name_from_base.return_value = full_name
 
     transformer.transform(DATA)
 
-    retrieve_image_name.assert_called_once_with()
-    name_from_base.assert_called_once_with(IMAGE_NAME)
+    retrieve_image_uri.assert_called_once_with()
+    name_from_base.assert_called_once_with(IMAGE_URI)
     assert transformer._current_job_name == full_name
 
 
@@ -250,7 +253,7 @@ def test_transform_with_job_name_based_on_containers(
 ):
     transformer.sagemaker_session.sagemaker_client.describe_model.return_value = model_desc
 
-    full_name = "{}-{}".format(IMAGE_NAME, TIMESTAMP)
+    full_name = "{}-{}".format(IMAGE_URI, TIMESTAMP)
     name_from_base.return_value = full_name
 
     transformer.transform(DATA)
@@ -258,7 +261,7 @@ def test_transform_with_job_name_based_on_containers(
     transformer.sagemaker_session.sagemaker_client.describe_model.assert_called_once_with(
         ModelName=MODEL_NAME
     )
-    name_from_base.assert_called_once_with(IMAGE_NAME)
+    name_from_base.assert_called_once_with(IMAGE_URI)
     assert transformer._current_job_name == full_name
 
 
@@ -300,13 +303,13 @@ def test_transform_with_invalid_s3_uri(transformer):
     assert "Invalid S3 URI" in str(e)
 
 
-def test_retrieve_image_name(sagemaker_session, transformer):
+def test_retrieve_image_uri(sagemaker_session, transformer):
     sage_mock = Mock(name="sagemaker_client")
-    sage_mock.describe_model.return_value = {"PrimaryContainer": {"Image": IMAGE_NAME}}
+    sage_mock.describe_model.return_value = {"PrimaryContainer": {"Image": IMAGE_URI}}
 
     sagemaker_session.sagemaker_client = sage_mock
 
-    assert transformer._retrieve_image_name() == IMAGE_NAME
+    assert transformer._retrieve_image_uri() == IMAGE_URI
 
 
 @patch("sagemaker.transformer.Transformer._ensure_last_transform_job")
@@ -428,6 +431,8 @@ def test_start_new(prepare_data_processing, load_config, sagemaker_session):
     split_type = "Line"
     io_filter = "$"
     join_source = "Input"
+    model_client_config = {"InvocationsTimeoutInSeconds": 60, "InvocationsMaxRetries": 2}
+
     job = _TransformJob.start_new(
         transformer=transformer,
         data=DATA,
@@ -439,6 +444,7 @@ def test_start_new(prepare_data_processing, load_config, sagemaker_session):
         output_filter=io_filter,
         join_source=join_source,
         experiment_config={"ExperimentName": "exp"},
+        model_client_config=model_client_config,
     )
 
     assert job.sagemaker_session == sagemaker_session
@@ -460,6 +466,7 @@ def test_start_new(prepare_data_processing, load_config, sagemaker_session):
         output_config=output_config,
         resource_config=resource_config,
         experiment_config={"ExperimentName": "exp"},
+        model_client_config=model_client_config,
         tags=tags,
         data_processing=prepare_data_processing.return_value,
     )

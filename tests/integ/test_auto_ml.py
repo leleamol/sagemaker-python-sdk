@@ -18,7 +18,7 @@ import pytest
 import tests.integ
 from sagemaker import AutoML, CandidateEstimator, AutoMLInput
 
-from sagemaker.exceptions import UnexpectedStatusException
+from botocore.exceptions import ClientError
 from sagemaker.utils import unique_name_from_base
 from tests.integ import DATA_DIR, AUTO_ML_DEFAULT_TIMEMOUT_MINUTES, auto_ml_utils
 from tests.integ.timeout import timeout
@@ -32,11 +32,14 @@ TARGET_ATTRIBUTE_NAME = "virginica"
 DATA_DIR = os.path.join(DATA_DIR, "automl", "data")
 TRAINING_DATA = os.path.join(DATA_DIR, "iris_training.csv")
 TEST_DATA = os.path.join(DATA_DIR, "iris_test.csv")
+TRANSFORM_DATA = os.path.join(DATA_DIR, "iris_transform.csv")
 PROBLEM_TYPE = "MultiClassClassification"
 BASE_JOB_NAME = "auto-ml"
 
 # use a succeeded AutoML job to test describe and list candidates method, otherwise tests will run too long
 AUTO_ML_JOB_NAME = "python-sdk-integ-test-base-job"
+DEFAULT_MODEL_NAME = "python-sdk-automl"
+
 
 EXPECTED_DEFAULT_JOB_CONFIG = {
     "CompletionCriteria": {"MaxCandidates": 3},
@@ -54,7 +57,7 @@ def test_auto_ml_fit(sagemaker_session):
         role=ROLE,
         target_attribute_name=TARGET_ATTRIBUTE_NAME,
         sagemaker_session=sagemaker_session,
-        max_candidates=3,
+        max_candidates=1,
     )
 
     job_name = unique_name_from_base("auto-ml", max_length=32)
@@ -73,6 +76,7 @@ def test_auto_ml_fit_local_input(sagemaker_session):
         target_attribute_name=TARGET_ATTRIBUTE_NAME,
         sagemaker_session=sagemaker_session,
         max_candidates=1,
+        generate_candidate_definitions_only=True,
     )
 
     inputs = TRAINING_DATA
@@ -91,6 +95,7 @@ def test_auto_ml_input_object_fit(sagemaker_session):
         target_attribute_name=TARGET_ATTRIBUTE_NAME,
         sagemaker_session=sagemaker_session,
         max_candidates=1,
+        generate_candidate_definitions_only=True,
     )
     job_name = unique_name_from_base("auto-ml", max_length=32)
     s3_input = sagemaker_session.upload_data(path=TRAINING_DATA, key_prefix=PREFIX + "/input")
@@ -115,6 +120,7 @@ def test_auto_ml_fit_optional_args(sagemaker_session):
         output_path=output_path,
         problem_type=problem_type,
         job_objective=job_objective,
+        generate_candidate_definitions_only=True,
     )
     inputs = TRAINING_DATA
     with timeout(minutes=AUTO_ML_DEFAULT_TIMEMOUT_MINUTES):
@@ -139,7 +145,9 @@ def test_auto_ml_invalid_target_attribute(sagemaker_session):
     job_name = unique_name_from_base("auto-ml", max_length=32)
     inputs = sagemaker_session.upload_data(path=TRAINING_DATA, key_prefix=PREFIX + "/input")
     with pytest.raises(
-        UnexpectedStatusException, match="Could not complete the data builder processing job."
+        ClientError,
+        match=r"An error occurred \(ValidationException\) when calling the CreateAutoMLJob "
+        "operation: Target attribute name y does not exist in header.",
     ):
         auto_ml.fit(inputs, job_name=job_name)
 
@@ -178,6 +186,42 @@ def test_auto_ml_describe_auto_ml_job(sagemaker_session):
     assert desc["InputDataConfig"] == expected_default_input_config
     assert desc["AutoMLJobConfig"] == EXPECTED_DEFAULT_JOB_CONFIG
     assert desc["OutputDataConfig"] == expected_default_output_config
+
+
+@pytest.mark.skipif(
+    tests.integ.test_region() in tests.integ.NO_AUTO_ML_REGIONS,
+    reason="AutoML is not supported in the region yet.",
+)
+def test_auto_ml_attach(sagemaker_session):
+    expected_default_input_config = [
+        {
+            "DataSource": {
+                "S3DataSource": {
+                    "S3DataType": "S3Prefix",
+                    "S3Uri": "s3://{}/{}/input/iris_training.csv".format(
+                        sagemaker_session.default_bucket(), PREFIX
+                    ),
+                }
+            },
+            "TargetAttributeName": TARGET_ATTRIBUTE_NAME,
+        }
+    ]
+    expected_default_output_config = {
+        "S3OutputPath": "s3://{}/".format(sagemaker_session.default_bucket())
+    }
+
+    auto_ml_utils.create_auto_ml_job_if_not_exist(sagemaker_session)
+
+    attached_automl_job = AutoML.attach(
+        auto_ml_job_name=AUTO_ML_JOB_NAME, sagemaker_session=sagemaker_session
+    )
+    attached_desc = attached_automl_job.describe_auto_ml_job()
+    assert attached_desc["AutoMLJobName"] == AUTO_ML_JOB_NAME
+    assert attached_desc["AutoMLJobStatus"] == "Completed"
+    assert isinstance(attached_desc["BestCandidate"], dict)
+    assert attached_desc["InputDataConfig"] == expected_default_input_config
+    assert attached_desc["AutoMLJobConfig"] == EXPECTED_DEFAULT_JOB_CONFIG
+    assert attached_desc["OutputDataConfig"] == expected_default_output_config
 
 
 @pytest.mark.skipif(
@@ -259,39 +303,6 @@ def test_candidate_estimator_default_rerun_and_deploy(sagemaker_session, cpu_ins
     endpoint_name = unique_name_from_base("sagemaker-auto-ml-rerun-candidate-test")
     with timeout(minutes=AUTO_ML_DEFAULT_TIMEMOUT_MINUTES):
         candidate_estimator.fit(inputs)
-        auto_ml.deploy(
-            initial_instance_count=INSTANCE_COUNT,
-            instance_type=cpu_instance_type,
-            candidate=candidate,
-            endpoint_name=endpoint_name,
-        )
-
-    endpoint_status = sagemaker_session.sagemaker_client.describe_endpoint(
-        EndpointName=endpoint_name
-    )["EndpointStatus"]
-    assert endpoint_status == "InService"
-    sagemaker_session.sagemaker_client.delete_endpoint(EndpointName=endpoint_name)
-
-
-@pytest.mark.skipif(
-    tests.integ.test_region() in tests.integ.NO_AUTO_ML_REGIONS,
-    reason="AutoML is not supported in the region yet.",
-)
-def test_candidate_estimator_rerun_with_optional_args(sagemaker_session, cpu_instance_type):
-    auto_ml_utils.create_auto_ml_job_if_not_exist(sagemaker_session)
-
-    auto_ml = AutoML(
-        role=ROLE, target_attribute_name=TARGET_ATTRIBUTE_NAME, sagemaker_session=sagemaker_session
-    )
-
-    candidates = auto_ml.list_candidates(job_name=AUTO_ML_JOB_NAME)
-    candidate = candidates[1]
-
-    candidate_estimator = CandidateEstimator(candidate, sagemaker_session)
-    inputs = sagemaker_session.upload_data(path=TEST_DATA, key_prefix=PREFIX + "/input")
-    endpoint_name = unique_name_from_base("sagemaker-auto-ml-rerun-candidate-test")
-    with timeout(minutes=AUTO_ML_DEFAULT_TIMEMOUT_MINUTES):
-        candidate_estimator.fit(inputs, encrypt_inter_container_traffic=True)
         auto_ml.deploy(
             initial_instance_count=INSTANCE_COUNT,
             instance_type=cpu_instance_type,

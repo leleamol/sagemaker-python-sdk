@@ -1,8 +1,3 @@
-+-------------------------------------------------------------------------------------------------+
-| **NOTE**: We are working on v2.0.0. See https://github.com/aws/sagemaker-python-sdk/issues/1459 |
-| for more info on our plans and to leave feedback!                                               |
-+-------------------------------------------------------------------------------------------------+
-
 .. image:: https://github.com/aws/sagemaker-python-sdk/raw/master/branding/icon/sagemaker-banner.png
     :height: 100px
     :alt: SageMaker
@@ -58,7 +53,6 @@ Table of Contents
 #. `Secure Training and Inference with VPC <https://sagemaker.readthedocs.io/en/stable/overview.html#secure-training-and-inference-with-vpc>`__
 #. `BYO Model <https://sagemaker.readthedocs.io/en/stable/overview.html#byo-model>`__
 #. `Inference Pipelines <https://sagemaker.readthedocs.io/en/stable/overview.html#inference-pipelines>`__
-#. `Amazon SageMaker Operators for Kubernetes <https://sagemaker.readthedocs.io/en/stable/amazon_sagemaker_operators_for_kubernetes.html>`__
 #. `Amazon SageMaker Operators in Apache Airflow <https://sagemaker.readthedocs.io/en/stable/using_workflow.html>`__
 #. `SageMaker Autopilot <src/sagemaker/automl/README.rst>`__
 #. `Model Monitoring <https://sagemaker.readthedocs.io/en/stable/amazon_sagemaker_model_monitoring.html>`__
@@ -93,9 +87,9 @@ Supported Python Versions
 
 SageMaker Python SDK is tested on:
 
-- Python 2.7
 - Python 3.6
 - Python 3.7
+- Python 3.8
 
 AWS Permissions
 ~~~~~~~~~~~~~~~
@@ -121,10 +115,9 @@ You can install the libraries needed to run the tests by running :code:`pip inst
 
 **Unit tests**
 
-
 We run unit tests with tox, which is a program that lets you run unit tests for multiple Python versions, and also make sure the
-code fits our style guidelines. We run tox with Python 2.7, 3.6 and 3.7, so to run unit tests
-with the same configuration we do, you'll need to have interpreters for Python 2.7, Python 3.6 and Python 3.7 installed.
+code fits our style guidelines. We run tox with `all of our supported Python versions <#supported-python-versions>`_, so to run unit tests
+with the same configuration we do, you need to have interpreters for those Python versions installed.
 
 To run the unit tests with tox, run:
 
@@ -164,23 +157,26 @@ You can also run them in parallel:
 Building Sphinx docs
 ~~~~~~~~~~~~~~~~~~~~
 
-Setup a Python environment with ``sphinx`` and ``sagemaker``:
+Setup a Python environment, and install the dependencies listed in ``doc/requirements.txt``:
 
 ::
 
+    # conda
     conda create -n sagemaker python=3.7
     conda activate sagemaker
-    conda install sphinx==2.2.2
-    pip install sagemaker --user
+    conda install sphinx=3.1.1 sphinx_rtd_theme=0.5.0
 
-Install the Read The Docs theme:
+    # pip
+    pip install -r doc/requirements.txt
+
+
+Clone/fork the repo, and install your local version:
 
 ::
 
-    pip install sphinx_rtd_theme --user
+    pip install --upgrade .
 
-
-Clone/fork the repo, ``cd`` into the ``sagemaker-python-sdk/doc`` directory and run:
+Then ``cd`` into the ``sagemaker-python-sdk/doc`` directory and run:
 
 ::
 
@@ -205,7 +201,7 @@ In order to host a SparkML model in SageMaker, it should be serialized with ``ML
 
 For more information on MLeap, see https://github.com/combust/mleap .
 
-Supported major version of Spark: 2.2 (MLeap version - 0.9.6)
+Supported major version of Spark: 2.4 (MLeap version - 0.9.6)
 
 Here is an example on how to create an instance of  ``SparkMLModel`` class and use ``deploy()`` method to create an
 endpoint which can be used to perform prediction against your trained SparkML Model.

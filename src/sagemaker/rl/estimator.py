@@ -17,10 +17,11 @@ import enum
 import logging
 import re
 
+from sagemaker import image_uris, fw_utils
 from sagemaker.estimator import Framework
-import sagemaker.fw_utils as fw_utils
 from sagemaker.model import FrameworkModel, SAGEMAKER_OUTPUT_LOCATION
 from sagemaker.mxnet.model import MXNetModel
+from sagemaker.tensorflow.model import TensorFlowModel
 from sagemaker.vpc_utils import VPC_CONFIG_DEFAULT
 
 logger = logging.getLogger("sagemaker")
@@ -35,12 +36,15 @@ TOOLKIT_FRAMEWORK_VERSION_MAP = {
         "0.11.0": {"tensorflow": "1.11", "mxnet": "1.3"},
         "0.11.1": {"tensorflow": "1.12"},
         "0.11": {"tensorflow": "1.12", "mxnet": "1.3"},
+        "1.0.0": {"tensorflow": "1.12"},
     },
     "ray": {
         "0.5.3": {"tensorflow": "1.11"},
         "0.5": {"tensorflow": "1.11"},
         "0.6.5": {"tensorflow": "1.12"},
         "0.6": {"tensorflow": "1.12"},
+        "0.8.2": {"tensorflow": "2.1"},
+        "0.8.5": {"tensorflow": "2.1", "pytorch": "1.5"},
     },
 }
 
@@ -57,6 +61,7 @@ class RLFramework(enum.Enum):
 
     TENSORFLOW = "tensorflow"
     MXNET = "mxnet"
+    PYTORCH = "pytorch"
 
 
 class RLEstimator(Framework):
@@ -64,7 +69,7 @@ class RLEstimator(Framework):
 
     COACH_LATEST_VERSION_TF = "0.11.1"
     COACH_LATEST_VERSION_MXNET = "0.11.0"
-    RAY_LATEST_VERSION = "0.6.5"
+    RAY_LATEST_VERSION = "0.8.5"
 
     def __init__(
         self,
@@ -74,15 +79,15 @@ class RLEstimator(Framework):
         framework=None,
         source_dir=None,
         hyperparameters=None,
-        image_name=None,
+        image_uri=None,
         metric_definitions=None,
         **kwargs
     ):
-        """This Estimator executes an RLEstimator script in a managed
-        Reinforcement Learning (RL) execution environment within a SageMaker
-        Training Job. The managed RL environment is an Amazon-built Docker
-        container that executes functions defined in the supplied
-        ``entry_point`` Python script.
+        """Creates an RLEstimator for managed Reinforcement Learning (RL).
+
+        It will execute an RLEstimator script within a SageMaker Training Job. The managed RL
+        environment is an Amazon-built Docker container that executes functions defined in the
+        supplied ``entry_point`` Python script.
 
         Training is started by calling
         :meth:`~sagemaker.amazon.estimator.Framework.fit` on this Estimator.
@@ -90,7 +95,7 @@ class RLEstimator(Framework):
         :meth:`~sagemaker.amazon.estimator.Framework.deploy` creates a hosted
         SageMaker endpoint and based on the specified framework returns an
         :class:`~sagemaker.amazon.mxnet.model.MXNetPredictor` or
-        :class:`~sagemaker.amazon.tensorflow.serving.Predictor` instance that
+        :class:`~sagemaker.amazon.tensorflow.model.TensorFlowPredictor` instance that
         can be used to perform inference against the hosted model.
 
         Technical documentation on preparing RLEstimator scripts for
@@ -119,7 +124,7 @@ class RLEstimator(Framework):
                 accessible as a dict[str, str] to the training code on
                 SageMaker. For convenience, this accepts other types for keys
                 and values.
-            image_name (str): An ECR url. If specified, the estimator will use
+            image_uri (str): An ECR url. If specified, the estimator will use
                 this image for training and hosting, instead of selecting the
                 appropriate SageMaker official image based on framework_version
                 and py_version. Example:
@@ -139,9 +144,9 @@ class RLEstimator(Framework):
             :class:`~sagemaker.estimator.Framework` and
             :class:`~sagemaker.estimator.EstimatorBase`.
         """
-        self._validate_images_args(toolkit, toolkit_version, framework, image_name)
+        self._validate_images_args(toolkit, toolkit_version, framework, image_uri)
 
-        if not image_name:
+        if not image_uri:
             self._validate_toolkit_support(toolkit.value, toolkit_version, framework.value)
             self.toolkit = toolkit.value
             self.toolkit_version = toolkit_version
@@ -158,7 +163,7 @@ class RLEstimator(Framework):
             entry_point,
             source_dir,
             hyperparameters,
-            image_name=image_name,
+            image_uri=image_uri,
             metric_definitions=metric_definitions,
             **kwargs
         )
@@ -172,8 +177,7 @@ class RLEstimator(Framework):
         dependencies=None,
         **kwargs
     ):
-        """Create a SageMaker ``RLEstimatorModel`` object that can be deployed
-        to an Endpoint.
+        """Create a SageMaker ``RLEstimatorModel`` object that can be deployed to an Endpoint.
 
         Args:
             role (str): The ``ExecutionRoleArn`` IAM Role ARN for the ``Model``,
@@ -199,6 +203,7 @@ class RLEstimator(Framework):
                 folders will be copied to SageMaker in the same folder where the
                 entry_point is copied. If the ```source_dir``` points to S3,
                 code will be uploaded and the S3 location will be used instead.
+                This is not supported with "local code" in Local Mode.
             **kwargs: Additional kwargs passed to the :class:`~sagemaker.model.FrameworkModel`
                 constructor.
 
@@ -206,30 +211,31 @@ class RLEstimator(Framework):
             sagemaker.model.FrameworkModel: Depending on input parameters returns
                 one of the following:
 
-                * :class:`~sagemaker.model.FrameworkModel` - if ``image_name`` was specified
+                * :class:`~sagemaker.model.FrameworkModel` - if ``image_uri`` is specified
                     on the estimator;
-                * :class:`~sagemaker.mxnet.MXNetModel` - if ``image_name`` wasn't specified and
-                    MXNet was used as the RL backend;
-                * :class:`~sagemaker.tensorflow.serving.Model` - if ``image_name`` wasn't specified
-                    and TensorFlow was used as the RL backend.
+                * :class:`~sagemaker.mxnet.MXNetModel` - if ``image_uri`` isn't specified and
+                    MXNet is used as the RL backend;
+                * :class:`~sagemaker.tensorflow.model.TensorFlowModel` - if ``image_uri`` isn't
+                    specified and TensorFlow is used as the RL backend.
 
         Raises:
-            ValueError: If image_name was not specified and framework enum is not valid.
+            ValueError: If image_uri is not specified and framework enum is not valid.
         """
         base_args = dict(
             model_data=self.model_data,
             role=role or self.role,
-            image=kwargs.get("image", self.image_name),
-            name=kwargs.get("name", self._current_job_name),
+            image_uri=kwargs.get("image_uri", self.image_uri),
             container_log_level=self.container_log_level,
             sagemaker_session=self.sagemaker_session,
             vpc_config=self.get_vpc_config(vpc_config_override),
         )
 
+        base_args["name"] = self._get_or_create_name(kwargs.get("name"))
+
         if not entry_point and (source_dir or dependencies):
             raise AttributeError("Please provide an `entry_point`.")
 
-        entry_point = entry_point or self.entry_point
+        entry_point = entry_point or self._model_entry_point()
         source_dir = source_dir or self._model_source_dir()
         dependencies = dependencies or self.dependencies
 
@@ -238,11 +244,10 @@ class RLEstimator(Framework):
             source_dir=source_dir,
             code_location=self.code_location,
             dependencies=dependencies,
-            enable_cloudwatch_metrics=self.enable_cloudwatch_metrics,
         )
         extended_args.update(base_args)
 
-        if self.image_name:
+        if self.image_uri:
             return FrameworkModel(**extended_args)
 
         if self.toolkit == RLToolkit.RAY.value:
@@ -253,9 +258,7 @@ class RLEstimator(Framework):
             )
 
         if self.framework == RLFramework.TENSORFLOW.value:
-            from sagemaker.tensorflow.serving import Model as tfsModel
-
-            return tfsModel(framework_version=self.framework_version, **base_args)
+            return TensorFlowModel(framework_version=self.framework_version, **base_args)
         if self.framework == RLFramework.MXNET.value:
             return MXNetModel(
                 framework_version=self.framework_version, py_version=PYTHON_VERSION, **extended_args
@@ -264,7 +267,7 @@ class RLEstimator(Framework):
             "An unknown RLFramework enum was passed in. framework: {}".format(self.framework)
         )
 
-    def train_image(self):
+    def training_image_uri(self):
         """Return the Docker image to use for training.
 
         The :meth:`~sagemaker.estimator.EstimatorBase.fit` method, which does
@@ -274,20 +277,20 @@ class RLEstimator(Framework):
         Returns:
             str: The URI of the Docker image.
         """
-        if self.image_name:
-            return self.image_name
-        return fw_utils.create_image_uri(
-            self.sagemaker_session.boto_region_name,
+        if self.image_uri:
+            return self.image_uri
+        return image_uris.retrieve(
             self._image_framework(),
-            self.train_instance_type,
-            self._image_version(),
-            py_version=PYTHON_VERSION,
+            self.sagemaker_session.boto_region_name,
+            version=self.toolkit_version,
+            instance_type=self.instance_type,
         )
 
     @classmethod
     def _prepare_init_params_from_job_description(cls, job_details, model_channel_name=None):
-        """Convert the job description to init params that can be handled by the
-        class constructor
+        """Convert the job description to init params.
+
+        This is done so that the init params can be handled by the class constructor.
 
         Args:
             job_details: the returned job details from a describe_training_job
@@ -302,22 +305,21 @@ class RLEstimator(Framework):
             job_details, model_channel_name
         )
 
-        image_name = init_params.pop("image")
-        framework, _, tag, _ = fw_utils.framework_name_from_image(image_name)
+        image_uri = init_params.pop("image_uri")
+        framework, _, tag, _ = fw_utils.framework_name_from_image(image_uri)
 
         if not framework:
             # If we were unable to parse the framework name from the image it is not one of our
             # officially supported images, in this case just add the image to the init params.
-            init_params["image_name"] = image_name
+            init_params["image_uri"] = image_uri
             return init_params
 
         toolkit, toolkit_version = cls._toolkit_and_version_from_tag(tag)
 
         if not cls._is_combination_supported(toolkit, toolkit_version, framework):
-            training_job_name = init_params["base_job_name"]
             raise ValueError(
                 "Training job: {} didn't use image for requested framework".format(
-                    training_job_name
+                    job_details["TrainingJobName"]
                 )
             )
 
@@ -328,9 +330,7 @@ class RLEstimator(Framework):
         return init_params
 
     def hyperparameters(self):
-        """Return hyperparameters used by your custom TensorFlow code during
-        model training.
-        """
+        """Return hyperparameters used by your custom TensorFlow code during model training."""
         hyperparameters = super(RLEstimator, self).hyperparameters()
 
         additional_hyperparameters = {
@@ -344,10 +344,7 @@ class RLEstimator(Framework):
 
     @classmethod
     def _toolkit_and_version_from_tag(cls, image_tag):
-        """
-        Args:
-            image_tag:
-        """
+        """Placeholder docstring."""
         tag_pattern = re.compile(
             "^([A-Z]*|[a-z]*)(\d.*)-(cpu|gpu)-(py2|py3)$"  # noqa: W605,E501 pylint: disable=anomalous-backslash-in-string
         )
@@ -358,43 +355,29 @@ class RLEstimator(Framework):
 
     @classmethod
     def _validate_framework_format(cls, framework):
-        """
-        Args:
-            framework:
-        """
-        if framework and framework not in RLFramework:
+        """Placeholder docstring."""
+        if framework and framework not in list(RLFramework):
             raise ValueError(
-                "Invalid type: {}, valid RL frameworks types are: [{}]".format(
-                    framework, [t for t in RLFramework]
+                "Invalid type: {}, valid RL frameworks types are: {}".format(
+                    framework, list(RLFramework)
                 )
             )
 
     @classmethod
     def _validate_toolkit_format(cls, toolkit):
-        """
-        Args:
-            toolkit:
-        """
-        if toolkit and toolkit not in RLToolkit:
+        """Placeholder docstring."""
+        if toolkit and toolkit not in list(RLToolkit):
             raise ValueError(
-                "Invalid type: {}, valid RL toolkits types are: [{}]".format(
-                    toolkit, [t for t in RLToolkit]
-                )
+                "Invalid type: {}, valid RL toolkits types are: {}".format(toolkit, list(RLToolkit))
             )
 
     @classmethod
-    def _validate_images_args(cls, toolkit, toolkit_version, framework, image_name):
-        """
-        Args:
-            toolkit:
-            toolkit_version:
-            framework:
-            image_name:
-        """
+    def _validate_images_args(cls, toolkit, toolkit_version, framework, image_uri):
+        """Placeholder docstring."""
         cls._validate_toolkit_format(toolkit)
         cls._validate_framework_format(framework)
 
-        if not image_name:
+        if not image_uri:
             not_found_args = []
             if not toolkit:
                 not_found_args.append("toolkit")
@@ -404,7 +387,7 @@ class RLEstimator(Framework):
                 not_found_args.append("framework")
             if not_found_args:
                 raise AttributeError(
-                    "Please provide `{}` or `image_name` parameter.".format(
+                    "Please provide `{}` or `image_uri` parameter.".format(
                         "`, `".join(not_found_args)
                     )
                 )
@@ -418,19 +401,14 @@ class RLEstimator(Framework):
                 found_args.append("framework")
             if found_args:
                 logger.warning(
-                    "Parameter `image_name` is specified, "
+                    "Parameter `image_uri` is specified, "
                     "`%s` are going to be ignored when choosing the image.",
                     "`, `".join(found_args),
                 )
 
     @classmethod
     def _is_combination_supported(cls, toolkit, toolkit_version, framework):
-        """
-        Args:
-            toolkit:
-            toolkit_version:
-            framework:
-        """
+        """Placeholder docstring."""
         supported_versions = TOOLKIT_FRAMEWORK_VERSION_MAP.get(toolkit, None)
         if supported_versions:
             supported_frameworks = supported_versions.get(toolkit_version, None)
@@ -440,12 +418,7 @@ class RLEstimator(Framework):
 
     @classmethod
     def _validate_toolkit_support(cls, toolkit, toolkit_version, framework):
-        """
-        Args:
-            toolkit:
-            toolkit_version:
-            framework:
-        """
+        """Placeholder docstring."""
         if not cls._is_combination_supported(toolkit, toolkit_version, framework):
             raise AttributeError(
                 "Provided `{}-{}` and `{}` combination is not supported.".format(
@@ -453,13 +426,9 @@ class RLEstimator(Framework):
                 )
             )
 
-    def _image_version(self):
-        """Placeholder docstring"""
-        return "{}{}".format(self.toolkit, self.toolkit_version)
-
     def _image_framework(self):
-        """Placeholder docstring"""
-        return "rl-{}".format(self.framework)
+        """Toolkit name and framework name for retrieving Docker image URI config."""
+        return "-".join((self.toolkit, self.framework))
 
     @classmethod
     def default_metric_definitions(cls, toolkit):

@@ -13,18 +13,23 @@
 """Placeholder docstring"""
 from __future__ import absolute_import
 
-from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase, registry
-from sagemaker.amazon.common import numpy_to_record_serializer, record_deserializer
+from sagemaker import image_uris
+from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase
+from sagemaker.amazon.common import RecordSerializer, RecordDeserializer
 from sagemaker.amazon.hyperparameter import Hyperparameter as hp  # noqa
 from sagemaker.amazon.validation import gt, isin
-from sagemaker.predictor import RealTimePredictor
+from sagemaker.predictor import Predictor
 from sagemaker.model import Model
 from sagemaker.session import Session
 from sagemaker.vpc_utils import VPC_CONFIG_DEFAULT
 
 
 class PCA(AmazonAlgorithmEstimatorBase):
-    """Placeholder docstring"""
+    """An unsupervised machine learning algorithm to reduce feature dimensionality.
+
+    As a result, number of features within a dataset is reduced but the dataset still
+    retain as much information as possible.
+    """
 
     repo_name = "pca"
     repo_version = 1
@@ -50,15 +55,16 @@ class PCA(AmazonAlgorithmEstimatorBase):
     def __init__(
         self,
         role,
-        train_instance_count,
-        train_instance_type,
-        num_components,
+        instance_count=None,
+        instance_type=None,
+        num_components=None,
         algorithm_mode=None,
         subtract_mean=None,
         extra_components=None,
         **kwargs
     ):
         """A Principal Components Analysis (PCA)
+
         :class:`~sagemaker.amazon.amazon_estimator.AmazonAlgorithmEstimatorBase`.
 
         This Estimator may be fit via calls to
@@ -97,9 +103,9 @@ class PCA(AmazonAlgorithmEstimatorBase):
                 endpoints use this role to access training data and model
                 artifacts. After the endpoint is created, the inference code
                 might use the IAM role, if accessing AWS resource.
-            train_instance_count (int): Number of Amazon EC2 instances to use
+            instance_count (int): Number of Amazon EC2 instances to use
                 for training.
-            train_instance_type (str): Type of EC2 instance to use for training,
+            instance_type (str): Type of EC2 instance to use for training,
                 for example, 'ml.c4.xlarge'.
             num_components (int): The number of principal components. Must be
                 greater than zero.
@@ -120,15 +126,16 @@ class PCA(AmazonAlgorithmEstimatorBase):
             :class:`~sagemaker.estimator.amazon_estimator.AmazonAlgorithmEstimatorBase` and
             :class:`~sagemaker.estimator.EstimatorBase`.
         """
-        super(PCA, self).__init__(role, train_instance_count, train_instance_type, **kwargs)
+        super(PCA, self).__init__(role, instance_count, instance_type, **kwargs)
         self.num_components = num_components
         self.algorithm_mode = algorithm_mode
         self.subtract_mean = subtract_mean
         self.extra_components = extra_components
 
     def create_model(self, vpc_config_override=VPC_CONFIG_DEFAULT, **kwargs):
-        """Return a :class:`~sagemaker.amazon.pca.PCAModel` referencing the
-        latest s3 model data produced by this Estimator.
+        """Return a :class:`~sagemaker.amazon.pca.PCAModel`.
+
+        It references the latest s3 model data produced by this Estimator.
 
         Args:
             vpc_config_override (dict[str, list[str]]): Optional override for VpcConfig set on
@@ -169,7 +176,7 @@ class PCA(AmazonAlgorithmEstimatorBase):
 
         # mini_batch_size is a required parameter
         default_mini_batch_size = min(
-            self.DEFAULT_MINI_BATCH_SIZE, max(1, int(num_records / self.train_instance_count))
+            self.DEFAULT_MINI_BATCH_SIZE, max(1, int(num_records / self.instance_count))
         )
         use_mini_batch_size = mini_batch_size or default_mini_batch_size
 
@@ -178,55 +185,85 @@ class PCA(AmazonAlgorithmEstimatorBase):
         )
 
 
-class PCAPredictor(RealTimePredictor):
+class PCAPredictor(Predictor):
     """Transforms input vectors to lower-dimesional representations.
 
     The implementation of
-    :meth:`~sagemaker.predictor.RealTimePredictor.predict` in this
-    `RealTimePredictor` requires a numpy ``ndarray`` as input. The array should
+    :meth:`~sagemaker.predictor.Predictor.predict` in this
+    `Predictor` requires a numpy ``ndarray`` as input. The array should
     contain the same number of columns as the feature-dimension of the data used
     to fit the model this Predictor performs inference on.
 
     :meth:`predict()` returns a list of
-    :class:`~sagemaker.amazon.record_pb2.Record` objects, one for each row in
+    :class:`~sagemaker.amazon.record_pb2.Record` objects (assuming the default
+    recordio-protobuf ``deserializer`` is used), one for each row in
     the input ``ndarray``. The lower dimension vector result is stored in the
     ``projection`` key of the ``Record.label`` field.
     """
 
-    def __init__(self, endpoint, sagemaker_session=None):
-        """
+    def __init__(
+        self,
+        endpoint_name,
+        sagemaker_session=None,
+        serializer=RecordSerializer(),
+        deserializer=RecordDeserializer(),
+    ):
+        """Initialization for PCAPredictor.
+
         Args:
-            endpoint:
-            sagemaker_session:
+            endpoint_name (str): Name of the Amazon SageMaker endpoint to which
+                requests are sent.
+            sagemaker_session (sagemaker.session.Session): A SageMaker Session
+                object, used for SageMaker interactions (default: None). If not
+                specified, one is created using the default AWS configuration
+                chain.
+            serializer (sagemaker.serializers.BaseSerializer): Optional. Default
+                serializes input data to x-recordio-protobuf format.
+            deserializer (sagemaker.deserializers.BaseDeserializer): Optional.
+                Default parses responses from x-recordio-protobuf format.
         """
         super(PCAPredictor, self).__init__(
-            endpoint,
+            endpoint_name,
             sagemaker_session,
-            serializer=numpy_to_record_serializer(),
-            deserializer=record_deserializer(),
+            serializer=serializer,
+            deserializer=deserializer,
         )
 
 
 class PCAModel(Model):
-    """Reference PCA s3 model data. Calling
-    :meth:`~sagemaker.model.Model.deploy` creates an Endpoint and return a
+    """Reference PCA s3 model data.
+
+    Calling :meth:`~sagemaker.model.Model.deploy` creates an Endpoint and return a
     Predictor that transforms vectors to a lower-dimensional representation.
     """
 
     def __init__(self, model_data, role, sagemaker_session=None, **kwargs):
-        """
+        """Initialization for PCAModel.
+
         Args:
-            model_data:
-            role:
-            sagemaker_session:
-            **kwargs:
+            model_data (str): The S3 location of a SageMaker model data
+                ``.tar.gz`` file.
+            role (str): An AWS IAM role (either name or full ARN). The Amazon
+                SageMaker training jobs and APIs that create Amazon SageMaker
+                endpoints use this role to access training data and model
+                artifacts. After the endpoint is created, the inference code
+                might use the IAM role, if it needs to access an AWS resource.
+            sagemaker_session (sagemaker.session.Session): Session object which
+                manages interactions with Amazon SageMaker APIs and any other
+                AWS services needed. If not specified, the estimator creates one
+                using the default AWS configuration chain.
+            **kwargs: Keyword arguments passed to the ``FrameworkModel``
+                initializer.
         """
         sagemaker_session = sagemaker_session or Session()
-        repo = "{}:{}".format(PCA.repo_name, PCA.repo_version)
-        image = "{}/{}".format(registry(sagemaker_session.boto_session.region_name), repo)
+        image_uri = image_uris.retrieve(
+            PCA.repo_name,
+            sagemaker_session.boto_region_name,
+            version=PCA.repo_version,
+        )
         super(PCAModel, self).__init__(
+            image_uri,
             model_data,
-            image,
             role,
             predictor_cls=PCAPredictor,
             sagemaker_session=sagemaker_session,

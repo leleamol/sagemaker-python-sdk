@@ -25,18 +25,153 @@ from sagemaker.local.image import _SageMakerContainer
 from sagemaker.local.utils import copy_directory_structure, move_to_destination
 from sagemaker.utils import DeferredError, get_config_value
 
+logger = logging.getLogger(__name__)
+
 try:
     import urllib3
 except ImportError as e:
-    logging.warning("urllib3 failed to import. Local mode features will be impaired or broken.")
+    logger.warning("urllib3 failed to import. Local mode features will be impaired or broken.")
     # Any subsequent attempt to use urllib3 will raise the ImportError
     urllib3 = DeferredError(e)
 
-
-logger = logging.getLogger(__name__)
-
 _UNUSED_ARN = "local:arn-does-not-matter"
 HEALTH_CHECK_TIMEOUT_LIMIT = 120
+
+
+class _LocalProcessingJob:
+    """Defines and starts a local processing job."""
+
+    _STARTING = "Starting"
+    _PROCESSING = "Processing"
+    _COMPLETED = "Completed"
+
+    def __init__(self, container):
+        """Creates a local processing job.
+
+        Args:
+            container: the local container object.
+        """
+        self.container = container
+        self.state = "Created"
+        self.start_time = None
+        self.end_time = None
+        self.processing_job_name = ""
+        self.processing_inputs = None
+        self.processing_output_config = None
+        self.environment = None
+
+    def start(self, processing_inputs, processing_output_config, environment, processing_job_name):
+        """Starts a local processing job.
+
+        Args:
+            processing_inputs: The processing input configuration.
+            processing_output_config: The processing input configuration.
+            environment: The collection of environment variables passed to the job.
+            processing_job_name: The processing job name.
+        """
+        self.state = self._STARTING
+
+        for item in processing_inputs:
+            if "DatasetDefinition" in item:
+                raise RuntimeError("DatasetDefinition is not currently supported in Local Mode")
+
+            try:
+                s3_input = item["S3Input"]
+            except KeyError:
+                raise ValueError("Processing input must have a valid ['S3Input']")
+
+            item["DataUri"] = s3_input["S3Uri"]
+
+            if "S3InputMode" in s3_input and s3_input["S3InputMode"] != "File":
+                raise RuntimeError(
+                    "S3InputMode: %s is not currently supported in Local Mode"
+                    % s3_input["S3InputMode"]
+                )
+
+            if (
+                "S3DataDistributionType" in s3_input
+                and s3_input["S3DataDistributionType"] != "FullyReplicated"
+            ):
+                raise RuntimeError(
+                    "DataDistribution: %s is not currently supported in Local Mode"
+                    % s3_input["S3DataDistributionType"]
+                )
+
+            if "S3CompressionType" in s3_input and s3_input["S3CompressionType"] != "None":
+                raise RuntimeError(
+                    "CompressionType: %s is not currently supported in Local Mode"
+                    % s3_input["S3CompressionType"]
+                )
+
+        if processing_output_config and "Outputs" in processing_output_config:
+            processing_outputs = processing_output_config["Outputs"]
+
+            for item in processing_outputs:
+                if "FeatureStoreOutput" in item:
+                    raise RuntimeError(
+                        "FeatureStoreOutput is not currently supported in Local Mode"
+                    )
+
+                try:
+                    s3_output = item["S3Output"]
+                except KeyError:
+                    raise ValueError("Processing output must have a valid ['S3Output']")
+
+                if s3_output["S3UploadMode"] != "EndOfJob":
+                    raise RuntimeError(
+                        "UploadMode: %s is not currently supported in Local Mode."
+                        % s3_output["S3UploadMode"]
+                    )
+
+        self.start_time = datetime.datetime.now()
+        self.state = self._PROCESSING
+
+        self.processing_job_name = processing_job_name
+        self.processing_inputs = processing_inputs
+        self.processing_output_config = processing_output_config
+        self.environment = environment
+
+        self.container.process(
+            processing_inputs, processing_output_config, environment, processing_job_name
+        )
+
+        self.end_time = datetime.datetime.now()
+        self.state = self._COMPLETED
+
+    def describe(self):
+        """Describes a local processing job.
+
+        Returns:
+            An object describing the processing job.
+        """
+
+        response = {
+            "ProcessingJobArn": self.processing_job_name,
+            "ProcessingJobName": self.processing_job_name,
+            "AppSpecification": {
+                "ImageUri": self.container.image,
+                "ContainerEntrypoint": self.container.container_entrypoint,
+                "ContainerArguments": self.container.container_arguments,
+            },
+            "Environment": self.environment,
+            "ProcessingInputs": self.processing_inputs,
+            "ProcessingOutputConfig": self.processing_output_config,
+            "ProcessingResources": {
+                "ClusterConfig": {
+                    "InstanceCount": self.container.instance_count,
+                    "InstanceType": self.container.instance_type,
+                    "VolumeSizeInGB": 30,
+                    "VolumeKmsKeyId": None,
+                }
+            },
+            "RoleArn": "<no_role>",
+            "StoppingCondition": {"MaxRuntimeInSeconds": 86400},
+            "ProcessingJobStatus": self.state,
+            "ProcessingStartTime": self.start_time,
+            "ProcessingEndTime": self.end_time,
+        }
+
+        return response
 
 
 class _LocalTrainingJob(object):
@@ -48,10 +183,6 @@ class _LocalTrainingJob(object):
     _states = ["Starting", "Training", "Completed"]
 
     def __init__(self, container):
-        """
-        Args:
-            container:
-        """
         self.container = container
         self.model_artifacts = None
         self.state = "created"
@@ -59,13 +190,7 @@ class _LocalTrainingJob(object):
         self.end_time = None
 
     def start(self, input_data_config, output_data_config, hyperparameters, job_name):
-        """
-        Args:
-            input_data_config:
-            output_data_config:
-            hyperparameters:
-            job_name:
-        """
+        """Placeholder docstring."""
         for channel in input_data_config:
             if channel["DataSource"] and "S3DataSource" in channel["DataSource"]:
                 data_distribution = channel["DataSource"]["S3DataSource"]["S3DataDistributionType"]
@@ -117,12 +242,6 @@ class _LocalTransformJob(object):
     _COMPLETED = "Completed"
 
     def __init__(self, transform_job_name, model_name, local_session=None):
-        """
-        Args:
-            transform_job_name:
-            model_name:
-            local_session:
-        """
         from sagemaker.local import LocalSession
 
         self.local_session = local_session or LocalSession()
@@ -231,8 +350,7 @@ class _LocalTransformJob(object):
         return response
 
     def _get_container_environment(self, **kwargs):
-        """Get all the Environment variables that will be passed to the
-        container
+        """Get all the Environment variables that will be passed to the container.
 
         Certain input fields such as BatchStrategy have different values for
         the API vs the Environment variables, such as SingleRecord vs
@@ -275,8 +393,9 @@ class _LocalTransformJob(object):
         return environment
 
     def _get_required_defaults(self, **kwargs):
-        """Return the default values for anything that was not provided by
-        either the user or the container
+        """Return the default values.
+
+         The values might be anything that was not provided by either the user or the container
 
         Args:
             **kwargs: current transform arguments
@@ -306,10 +425,14 @@ class _LocalTransformJob(object):
         return working_dir
 
     def _prepare_data_transformation(self, input_data, batch_strategy):
-        """
+        """Prepares the data for transformation.
+
         Args:
-            input_data:
-            batch_strategy:
+            input_data: Input data source.
+            batch_strategy: Strategy for batch transformation to get.
+
+        Returns:
+            A (data source, batch provider) pair.
         """
         input_path = input_data["DataSource"]["S3DataSource"]["S3Uri"]
         data_source = sagemaker.local.data.get_data_source_instance(input_path, self.local_session)
@@ -321,15 +444,17 @@ class _LocalTransformJob(object):
         return data_source, batch_provider
 
     def _perform_batch_inference(self, input_data, output_data, **kwargs):
-        # Transform the input data to feed the serving container. We need to first gather the files
-        # from S3 or Local FileSystem. Split them as required (Line, RecordIO, None) and finally
-        # batch them according to the batch strategy and limit the request size.
+        """Perform batch inference on the given input data.
 
-        """
+        Transforms the input data to feed the serving container. It first gathers
+        the files from S3 or Local FileSystem. It then splits the files as required
+        (Line, RecordIO, None), and finally, it batch them according to the batch
+        strategy and limit the request size.
+
         Args:
-            input_data:
-            output_data:
-            **kwargs:
+            input_data: Input data source.
+            output_data: Output data source.
+            **kwargs: Additional configuration arguments.
         """
         batch_strategy = kwargs["BatchStrategy"]
         max_payload = int(kwargs["MaxPayloadInMB"])
@@ -341,15 +466,15 @@ class _LocalTransformJob(object):
         working_dir = self._get_working_directory()
         dataset_dir = data_source.get_root_dir()
 
-        for file in data_source.get_file_list():
+        for fn in data_source.get_file_list():
 
-            relative_path = os.path.dirname(os.path.relpath(file, dataset_dir))
-            filename = os.path.basename(file)
+            relative_path = os.path.dirname(os.path.relpath(fn, dataset_dir))
+            filename = os.path.basename(fn)
             copy_directory_structure(working_dir, relative_path)
             destination_path = os.path.join(working_dir, relative_path, filename + ".out")
 
             with open(destination_path, "wb") as f:
-                for item in batch_provider.pad(file, max_payload):
+                for item in batch_provider.pad(fn, max_payload):
                     # call the container and add the result to inference.
                     response = self.local_session.sagemaker_runtime_client.invoke_endpoint(
                         item, "", input_data["ContentType"], accept
@@ -370,11 +495,6 @@ class _LocalModel(object):
     """Placeholder docstring"""
 
     def __init__(self, model_name, primary_container):
-        """
-        Args:
-            model_name:
-            primary_container:
-        """
         self.model_name = model_name
         self.primary_container = primary_container
         self.creation_time = datetime.datetime.now()
@@ -395,12 +515,6 @@ class _LocalEndpointConfig(object):
     """Placeholder docstring"""
 
     def __init__(self, config_name, production_variants, tags=None):
-        """
-        Args:
-            config_name:
-            production_variants:
-            tags:
-        """
         self.name = config_name
         self.production_variants = production_variants
         self.tags = tags
@@ -427,13 +541,6 @@ class _LocalEndpoint(object):
 
     def __init__(self, endpoint_name, endpoint_config_name, tags=None, local_session=None):
         # runtime import since there is a cyclic dependency between entities and local_session
-        """
-        Args:
-            endpoint_name:
-            endpoint_config_name:
-            tags:
-            local_session:
-        """
         from sagemaker.local import LocalSession
 
         self.local_session = local_session or LocalSession()
@@ -496,10 +603,7 @@ class _LocalEndpoint(object):
 
 
 def _wait_for_serving_container(serving_port):
-    """
-    Args:
-        serving_port:
-    """
+    """Placeholder docstring."""
     i = 0
     http = urllib3.PoolManager()
 
@@ -520,11 +624,7 @@ def _wait_for_serving_container(serving_port):
 
 
 def _perform_request(endpoint_url, pool_manager=None):
-    """
-    Args:
-        endpoint_url:
-        pool_manager:
-    """
+    """Placeholder docstring."""
     http = pool_manager or urllib3.PoolManager()
     try:
         r = http.request("GET", endpoint_url)

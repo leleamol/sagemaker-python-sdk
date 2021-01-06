@@ -13,18 +13,24 @@
 """Placeholder docstring"""
 from __future__ import absolute_import
 
-from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase, registry
-from sagemaker.amazon.common import numpy_to_record_serializer, record_deserializer
+from sagemaker import image_uris
+from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase
+from sagemaker.amazon.common import RecordSerializer, RecordDeserializer
 from sagemaker.amazon.hyperparameter import Hyperparameter as hp  # noqa
 from sagemaker.amazon.validation import ge, le, isin
-from sagemaker.predictor import RealTimePredictor
+from sagemaker.predictor import Predictor
 from sagemaker.model import Model
 from sagemaker.session import Session
 from sagemaker.vpc_utils import VPC_CONFIG_DEFAULT
 
 
 class NTM(AmazonAlgorithmEstimatorBase):
-    """Placeholder docstring"""
+    """An unsupervised learning algorithm used to organize a corpus of documents into topics.
+
+    The resulting topics contain word groupings based on their statistical distribution.
+    Documents that contain frequent occurrences of words such as "bike", "car", "train",
+    "mileage", and "speed" are likely to share a topic on "transportation" for example.
+    """
 
     repo_name = "ntm"
     repo_version = 1
@@ -59,9 +65,9 @@ class NTM(AmazonAlgorithmEstimatorBase):
     def __init__(
         self,
         role,
-        train_instance_count,
-        train_instance_type,
-        num_topics,
+        instance_count=None,
+        instance_type=None,
+        num_topics=None,
         encoder_layers=None,
         epochs=None,
         encoder_layers_activation=None,
@@ -75,8 +81,7 @@ class NTM(AmazonAlgorithmEstimatorBase):
         learning_rate=None,
         **kwargs
     ):
-        """Neural Topic Model (NTM) is :class:`Estimator` used for unsupervised
-        learning.
+        """Neural Topic Model (NTM) is :class:`Estimator` used for unsupervised learning.
 
         This Estimator may be fit via calls to
         :meth:`~sagemaker.amazon.amazon_estimator.AmazonAlgorithmEstimatorBase.fit`.
@@ -113,8 +118,8 @@ class NTM(AmazonAlgorithmEstimatorBase):
                 endpoints use this role to access training data and model
                 artifacts. After the endpoint is created, the inference code
                 might use the IAM role, if accessing AWS resource.
-            train_instance_count:
-            train_instance_type (str): Type of EC2 instance to use for training,
+            instance_count:
+            instance_type (str): Type of EC2 instance to use for training,
                 for example, 'ml.c4.xlarge'.
             num_topics (int): Required. The number of topics for NTM to find
                 within the data.
@@ -147,7 +152,7 @@ class NTM(AmazonAlgorithmEstimatorBase):
             :class:`~sagemaker.estimator.EstimatorBase`.
         """
 
-        super(NTM, self).__init__(role, train_instance_count, train_instance_type, **kwargs)
+        super(NTM, self).__init__(role, instance_count, instance_type, **kwargs)
         self.num_topics = num_topics
         self.encoder_layers = encoder_layers
         self.epochs = epochs
@@ -162,8 +167,9 @@ class NTM(AmazonAlgorithmEstimatorBase):
         self.learning_rate = learning_rate
 
     def create_model(self, vpc_config_override=VPC_CONFIG_DEFAULT, **kwargs):
-        """Return a :class:`~sagemaker.amazon.NTMModel` referencing the latest
-        s3 model data produced by this Estimator.
+        """Return a :class:`~sagemaker.amazon.NTMModel`.
+
+        It references the latest s3 model data produced by this Estimator.
 
         Args:
             vpc_config_override (dict[str, list[str]]): Optional override for VpcConfig set on
@@ -183,12 +189,7 @@ class NTM(AmazonAlgorithmEstimatorBase):
     def _prepare_for_training(  # pylint: disable=signature-differs
         self, records, mini_batch_size, job_name=None
     ):
-        """
-        Args:
-            records:
-            mini_batch_size:
-            job_name:
-        """
+        """Placeholder docstring"""
         if mini_batch_size is not None and (mini_batch_size < 1 or mini_batch_size > 10000):
             raise ValueError("mini_batch_size must be in [1, 10000]")
         super(NTM, self)._prepare_for_training(
@@ -196,57 +197,85 @@ class NTM(AmazonAlgorithmEstimatorBase):
         )
 
 
-class NTMPredictor(RealTimePredictor):
+class NTMPredictor(Predictor):
     """Transforms input vectors to lower-dimesional representations.
 
     The implementation of
-    :meth:`~sagemaker.predictor.RealTimePredictor.predict` in this
-    `RealTimePredictor` requires a numpy ``ndarray`` as input. The array should
+    :meth:`~sagemaker.predictor.Predictor.predict` in this
+    `Predictor` requires a numpy ``ndarray`` as input. The array should
     contain the same number of columns as the feature-dimension of the data used
     to fit the model this Predictor performs inference on.
 
     :meth:`predict()` returns a list of
-    :class:`~sagemaker.amazon.record_pb2.Record` objects, one for each row in
+    :class:`~sagemaker.amazon.record_pb2.Record` objects (assuming the default
+    recordio-protobuf ``deserializer`` is used), one for each row in
     the input ``ndarray``. The lower dimension vector result is stored in the
     ``projection`` key of the ``Record.label`` field.
     """
 
-    def __init__(self, endpoint, sagemaker_session=None):
-        """
+    def __init__(
+        self,
+        endpoint_name,
+        sagemaker_session=None,
+        serializer=RecordSerializer(),
+        deserializer=RecordDeserializer(),
+    ):
+        """Initialization for NTMPredictor class.
+
         Args:
-            endpoint:
-            sagemaker_session:
+            endpoint_name (str): Name of the Amazon SageMaker endpoint to which
+                requests are sent.
+            sagemaker_session (sagemaker.session.Session): A SageMaker Session
+                object, used for SageMaker interactions (default: None). If not
+                specified, one is created using the default AWS configuration
+                chain.
+            serializer (sagemaker.serializers.BaseSerializer): Optional. Default
+                serializes input data to x-recordio-protobuf format.
+            deserializer (sagemaker.deserializers.BaseDeserializer): Optional.
+                Default parses responses from x-recordio-protobuf format.
         """
         super(NTMPredictor, self).__init__(
-            endpoint,
+            endpoint_name,
             sagemaker_session,
-            serializer=numpy_to_record_serializer(),
-            deserializer=record_deserializer(),
+            serializer=serializer,
+            deserializer=deserializer,
         )
 
 
 class NTMModel(Model):
-    """Reference NTM s3 model data. Calling
-    :meth:`~sagemaker.model.Model.deploy` creates an Endpoint and return a
+    """Reference NTM s3 model data.
+
+    Calling :meth:`~sagemaker.model.Model.deploy` creates an Endpoint and return a
     Predictor that transforms vectors to a lower-dimensional representation.
     """
 
     def __init__(self, model_data, role, sagemaker_session=None, **kwargs):
-        """
+        """Initialization for NTMModel class.
+
         Args:
-            model_data:
-            role:
-            sagemaker_session:
-            **kwargs:
+            model_data (str): The S3 location of a SageMaker model data
+                ``.tar.gz`` file.
+            role (str): An AWS IAM role (either name or full ARN). The Amazon
+                SageMaker training jobs and APIs that create Amazon SageMaker
+                endpoints use this role to access training data and model
+                artifacts. After the endpoint is created, the inference code
+                might use the IAM role, if it needs to access an AWS resource.
+            sagemaker_session (sagemaker.session.Session): Session object which
+                manages interactions with Amazon SageMaker APIs and any other
+                AWS services needed. If not specified, the estimator creates one
+                using the default AWS configuration chain.
+            **kwargs: Keyword arguments passed to the ``FrameworkModel``
+                initializer.
         """
         sagemaker_session = sagemaker_session or Session()
-        repo = "{}:{}".format(NTM.repo_name, NTM.repo_version)
-        image = "{}/{}".format(
-            registry(sagemaker_session.boto_session.region_name, NTM.repo_name), repo
+        image_uri = image_uris.retrieve(
+            NTM.repo_name,
+            sagemaker_session.boto_region_name,
+            version=NTM.repo_version,
         )
         super(NTMModel, self).__init__(
+            image_uri,
             model_data,
-            image,
             role,
             predictor_cls=NTMPredictor,
             sagemaker_session=sagemaker_session,

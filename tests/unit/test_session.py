@@ -23,7 +23,7 @@ from botocore.exceptions import ClientError
 from mock import ANY, MagicMock, Mock, patch, call, mock_open
 
 import sagemaker
-from sagemaker import s3_input, Session, get_execution_role
+from sagemaker import TrainingInput, Session, get_execution_role
 from sagemaker.session import (
     _tuning_job_status,
     _transform_job_status,
@@ -50,6 +50,18 @@ def boto_session():
     )
     boto_mock.client.return_value = client_mock
     return boto_mock
+
+
+@patch("boto3.DEFAULT_SESSION")
+def test_default_session(boto3_default_session):
+    sess = Session()
+    assert sess.boto_session is boto3_default_session
+
+
+@patch("boto3.Session")
+def test_new_session_created(boto3_session):
+    sess = Session()
+    assert sess.boto_session is boto3_session.return_value
 
 
 def test_process(boto_session):
@@ -274,7 +286,7 @@ def test_get_execution_role_throws_exception_if_arn_is_not_role():
 
     with pytest.raises(ValueError) as error:
         get_execution_role(session)
-    assert "ValueError: The current AWS identity is not a role" in str(error)
+    assert "The current AWS identity is not a role" in str(error.value)
 
 
 def test_get_execution_role_throws_exception_if_arn_is_not_role_with_role_in_name():
@@ -283,7 +295,7 @@ def test_get_execution_role_throws_exception_if_arn_is_not_role_with_role_in_nam
 
     with pytest.raises(ValueError) as error:
         get_execution_role(session)
-    assert "ValueError: The current AWS identity is not a role" in str(error)
+    assert "The current AWS identity is not a role" in str(error.value)
 
 
 @patch("six.moves.builtins.open", mock_open(read_data='{"ResourceName": "SageMakerInstance"}'))
@@ -496,9 +508,9 @@ def test_user_agent_injected_with_nbi_ioerror(boto_session):
     )
 
 
-def test_s3_input_all_defaults():
+def test_training_input_all_defaults():
     prefix = "pre"
-    actual = s3_input(s3_data=prefix)
+    actual = TrainingInput(s3_data=prefix)
     expected = {
         "DataSource": {
             "S3DataSource": {
@@ -511,7 +523,7 @@ def test_s3_input_all_defaults():
     assert actual.config == expected
 
 
-def test_s3_input_all_arguments():
+def test_training_input_all_arguments():
     prefix = "pre"
     distribution = "FullyReplicated"
     compression = "Gzip"
@@ -519,7 +531,7 @@ def test_s3_input_all_arguments():
     record_wrapping = "RecordIO"
     s3_data_type = "Manifestfile"
     input_mode = "Pipe"
-    result = s3_input(
+    result = TrainingInput(
         s3_data=prefix,
         distribution=distribution,
         compression=compression,
@@ -564,6 +576,7 @@ EXPERIMENT_CONFIG = {
     "TrialName": "dummyT",
     "TrialComponentDisplayName": "dummyTC",
 }
+MODEL_CLIENT_CONFIG = {"InvocationsMaxRetries": 2, "InvocationsTimeoutInSeconds": 60}
 
 DEFAULT_EXPECTED_TRAIN_JOB_ARGS = {
     "OutputDataConfig": {"S3OutputPath": S3_OUTPUT},
@@ -639,11 +652,11 @@ IN_PROGRESS_DESCRIBE_TRANSFORM_JOB_RESULT.update({"TransformJobStatus": "InProgr
 
 @pytest.fixture()
 def sagemaker_session():
-    boto_mock = Mock(name="boto_session")
+    boto_mock = MagicMock(name="boto_session")
     boto_mock.client("sts", endpoint_url=STS_ENDPOINT).get_caller_identity.return_value = {
         "Account": "123"
     }
-    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=Mock())
+    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=MagicMock())
     ims.expand_role = Mock(return_value=EXPANDED_ROLE)
     return ims
 
@@ -673,7 +686,7 @@ def test_train_pack_to_request(sagemaker_session):
     stop_cond = {"MaxRuntimeInSeconds": MAX_TIME}
 
     sagemaker_session.train(
-        image=IMAGE,
+        image_uri=IMAGE,
         input_mode="File",
         input_config=in_config,
         role=EXPANDED_ROLE,
@@ -830,7 +843,7 @@ def test_tune_warm_start(sagemaker_session, warm_start_type, parents):
         max_parallel_jobs=5,
         parameter_ranges=SAMPLE_PARAM_RANGES,
         static_hyperparameters=STATIC_HPs,
-        image="dummy-image-1",
+        image_uri="dummy-image-1",
         input_mode="File",
         metric_definitions=SAMPLE_METRIC_DEF,
         role=EXPANDED_ROLE,
@@ -876,16 +889,16 @@ def test_create_tuning_job_with_both_training_config_and_list(sagemaker_session)
                 "max_parallel_jobs": 5,
                 "parameter_ranges": SAMPLE_PARAM_RANGES,
             },
-            training_config={"static_hyperparameters": STATIC_HPs, "image": "dummy-image-1"},
+            training_config={"static_hyperparameters": STATIC_HPs, "image_uri": "dummy-image-1"},
             training_config_list=[
                 {
                     "static_hyperparameters": STATIC_HPs,
-                    "image": "dummy-image-1",
+                    "image_uri": "dummy-image-1",
                     "estimator_name": "estimator_1",
                 },
                 {
                     "static_hyperparameters": STATIC_HPs_2,
-                    "image": "dummy-image-2",
+                    "image_uri": "dummy-image-2",
                     "estimator_name": "estimator_2",
                 },
             ],
@@ -918,7 +931,7 @@ def test_create_tuning_job(sagemaker_session):
         },
         training_config={
             "static_hyperparameters": STATIC_HPs,
-            "image": "dummy-image-1",
+            "image_uri": "dummy-image-1",
             "input_mode": "File",
             "metric_definitions": SAMPLE_METRIC_DEF,
             "role": EXPANDED_ROLE,
@@ -955,7 +968,7 @@ def test_create_tuning_job_multi_algo(sagemaker_session):
         training_config_list=[
             {
                 "static_hyperparameters": STATIC_HPs,
-                "image": "dummy-image-1",
+                "image_uri": "dummy-image-1",
                 "input_mode": "File",
                 "metric_definitions": SAMPLE_METRIC_DEF,
                 "role": EXPANDED_ROLE,
@@ -970,7 +983,7 @@ def test_create_tuning_job_multi_algo(sagemaker_session):
             },
             {
                 "static_hyperparameters": STATIC_HPs_2,
-                "image": "dummy-image-2",
+                "image_uri": "dummy-image-2",
                 "input_mode": "File",
                 "metric_definitions": SAMPLE_METRIC_DEF_2,
                 "role": EXPANDED_ROLE,
@@ -1011,7 +1024,7 @@ def test_tune(sagemaker_session):
         max_parallel_jobs=5,
         parameter_ranges=SAMPLE_PARAM_RANGES,
         static_hyperparameters=STATIC_HPs,
-        image="dummy-image-1",
+        image_uri="dummy-image-1",
         input_mode="File",
         metric_definitions=SAMPLE_METRIC_DEF,
         role=EXPANDED_ROLE,
@@ -1046,7 +1059,7 @@ def test_tune_with_encryption_flag(sagemaker_session):
         max_parallel_jobs=5,
         parameter_ranges=SAMPLE_PARAM_RANGES,
         static_hyperparameters=STATIC_HPs,
-        image="dummy-image-1",
+        image_uri="dummy-image-1",
         input_mode="File",
         metric_definitions=SAMPLE_METRIC_DEF,
         role=EXPANDED_ROLE,
@@ -1089,7 +1102,7 @@ def test_tune_with_spot_and_checkpoints(sagemaker_session):
         max_parallel_jobs=5,
         parameter_ranges=SAMPLE_PARAM_RANGES,
         static_hyperparameters=STATIC_HPs,
-        image="dummy-image-1",
+        image_uri="dummy-image-1",
         input_mode="File",
         metric_definitions=SAMPLE_METRIC_DEF,
         role=EXPANDED_ROLE,
@@ -1099,7 +1112,7 @@ def test_tune_with_spot_and_checkpoints(sagemaker_session):
         stop_condition=SAMPLE_STOPPING_CONDITION,
         tags=None,
         warm_start_config=None,
-        train_use_spot_instances=True,
+        use_spot_instances=True,
         checkpoint_s3_uri="s3://mybucket/checkpoints/",
         checkpoint_local_path="/tmp/checkpoints",
     )
@@ -1178,7 +1191,7 @@ def test_train_pack_to_request_with_optional_params(sagemaker_session):
     hyperparameters = {"foo": "bar"}
 
     sagemaker_session.train(
-        image=IMAGE,
+        image_uri=IMAGE,
         input_mode="File",
         input_config=in_config,
         role=EXPANDED_ROLE,
@@ -1191,7 +1204,7 @@ def test_train_pack_to_request_with_optional_params(sagemaker_session):
         tags=TAGS,
         metric_definitions=METRIC_DEFINITONS,
         encrypt_inter_container_traffic=True,
-        train_use_spot_instances=True,
+        use_spot_instances=True,
         checkpoint_s3_uri="s3://mybucket/checkpoints/",
         checkpoint_local_path="/tmp/checkpoints",
         enable_sagemaker_metrics=True,
@@ -1246,6 +1259,7 @@ def test_transform_pack_to_request(sagemaker_session):
         output_config=out_config,
         resource_config=resource_config,
         experiment_config=None,
+        model_client_config=None,
         tags=None,
         data_processing=data_processing,
     )
@@ -1271,6 +1285,7 @@ def test_transform_pack_to_request_with_optional_params(sagemaker_session):
         output_config={},
         resource_config={},
         experiment_config=EXPERIMENT_CONFIG,
+        model_client_config=MODEL_CLIENT_CONFIG,
         tags=TAGS,
         data_processing=None,
     )
@@ -1282,6 +1297,7 @@ def test_transform_pack_to_request_with_optional_params(sagemaker_session):
     assert actual_args["Environment"] == env
     assert actual_args["Tags"] == TAGS
     assert actual_args["ExperimentConfig"] == EXPERIMENT_CONFIG
+    assert actual_args["ModelClientConfig"] == MODEL_CLIENT_CONFIG
 
 
 @patch("sys.stdout", new_callable=io.BytesIO if six.PY2 else io.StringIO)
@@ -1336,10 +1352,10 @@ STREAM_LOG_EVENTS = [
 
 @pytest.fixture()
 def sagemaker_session_complete():
-    boto_mock = Mock(name="boto_session")
+    boto_mock = MagicMock(name="boto_session")
     boto_mock.client("logs").describe_log_streams.return_value = DEFAULT_LOG_STREAMS
     boto_mock.client("logs").get_log_events.side_effect = DEFAULT_LOG_EVENTS
-    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=Mock())
+    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=MagicMock())
     ims.sagemaker_client.describe_training_job.return_value = COMPLETED_DESCRIBE_JOB_RESULT
     ims.sagemaker_client.describe_transform_job.return_value = (
         COMPLETED_DESCRIBE_TRANSFORM_JOB_RESULT
@@ -1349,10 +1365,10 @@ def sagemaker_session_complete():
 
 @pytest.fixture()
 def sagemaker_session_stopped():
-    boto_mock = Mock(name="boto_session")
+    boto_mock = MagicMock(name="boto_session")
     boto_mock.client("logs").describe_log_streams.return_value = DEFAULT_LOG_STREAMS
     boto_mock.client("logs").get_log_events.side_effect = DEFAULT_LOG_EVENTS
-    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=Mock())
+    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=MagicMock())
     ims.sagemaker_client.describe_training_job.return_value = STOPPED_DESCRIBE_JOB_RESULT
     ims.sagemaker_client.describe_transform_job.return_value = STOPPED_DESCRIBE_TRANSFORM_JOB_RESULT
     return ims
@@ -1360,10 +1376,10 @@ def sagemaker_session_stopped():
 
 @pytest.fixture()
 def sagemaker_session_ready_lifecycle():
-    boto_mock = Mock(name="boto_session")
+    boto_mock = MagicMock(name="boto_session")
     boto_mock.client("logs").describe_log_streams.return_value = DEFAULT_LOG_STREAMS
     boto_mock.client("logs").get_log_events.side_effect = STREAM_LOG_EVENTS
-    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=Mock())
+    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=MagicMock())
     ims.sagemaker_client.describe_training_job.side_effect = [
         IN_PROGRESS_DESCRIBE_JOB_RESULT,
         IN_PROGRESS_DESCRIBE_JOB_RESULT,
@@ -1379,10 +1395,10 @@ def sagemaker_session_ready_lifecycle():
 
 @pytest.fixture()
 def sagemaker_session_full_lifecycle():
-    boto_mock = Mock(name="boto_session")
+    boto_mock = MagicMock(name="boto_session")
     boto_mock.client("logs").describe_log_streams.side_effect = LIFECYCLE_LOG_STREAMS
     boto_mock.client("logs").get_log_events.side_effect = STREAM_LOG_EVENTS
-    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=Mock())
+    ims = sagemaker.Session(boto_session=boto_mock, sagemaker_client=MagicMock())
     ims.sagemaker_client.describe_training_job.side_effect = [
         IN_PROGRESS_DESCRIBE_JOB_RESULT,
         IN_PROGRESS_DESCRIBE_JOB_RESULT,
@@ -1685,7 +1701,7 @@ def test_create_model_from_job_with_tags(sagemaker_session):
 def test_create_model_from_job_with_image(sagemaker_session):
     ims = sagemaker_session
     ims.sagemaker_client.describe_training_job.return_value = COMPLETED_DESCRIBE_JOB_RESULT
-    ims.create_model_from_job(JOB_NAME, primary_container_image="some-image")
+    ims.create_model_from_job(JOB_NAME, image_uri="some-image")
     [create_model_call] = ims.sagemaker_client.create_model.call_args_list
     assert dict(create_model_call[1]["PrimaryContainer"])["Image"] == "some-image"
 
@@ -1694,7 +1710,10 @@ def test_create_model_from_job_with_container_def(sagemaker_session):
     ims = sagemaker_session
     ims.sagemaker_client.describe_training_job.return_value = COMPLETED_DESCRIBE_JOB_RESULT
     ims.create_model_from_job(
-        JOB_NAME, primary_container_image="some-image", model_data_url="some-data", env={"a": "b"}
+        JOB_NAME,
+        image_uri="some-image",
+        model_data_url="some-data",
+        env={"a": "b"},
     )
     [create_model_call] = ims.sagemaker_client.create_model.call_args_list
     c_def = create_model_call[1]["PrimaryContainer"]
@@ -2113,3 +2132,199 @@ def test_list_candidates_for_auto_ml_job_with_optional_args(sagemaker_session):
     sagemaker_session.sagemaker_client.list_candidates_for_auto_ml_job.assert_called_with(
         **COMPLETE_EXPECTED_LIST_CANDIDATES_ARGS
     )
+
+
+def test_describe_tuning_job(sagemaker_session):
+    job_name = "hyper-parameter-tuning"
+    sagemaker_session.describe_tuning_job(job_name=job_name)
+    sagemaker_session.sagemaker_client.describe_hyper_parameter_tuning_job.assert_called_with(
+        HyperParameterTuningJobName=job_name
+    )
+
+
+@pytest.fixture
+def pipeline_empty_definition():
+    return '{"Version": "2020-12-01", ' '"Metadata": {}, ' '"Parameters": [], ' '"Steps": []}'
+
+
+@pytest.fixture
+def pipeline_role_arn():
+    return "my:pipeline:role:arn"
+
+
+def test_describe_model(sagemaker_session):
+    model_name = "sagemaker-model-name"
+    sagemaker_session.describe_model(name=model_name)
+    sagemaker_session.sagemaker_client.describe_model.assert_called_with(ModelName=model_name)
+
+
+def test_create_model_package_from_containers(sagemaker_session):
+    model_package_name = "sagemaker-model-package"
+    sagemaker_session.create_model_package_from_containers(model_package_name=model_package_name)
+    sagemaker_session.sagemaker_client.create_model_package.assert_called_once()
+
+
+def test_create_model_package_from_containers_name_conflict(sagemaker_session):
+    model_package_name = "sagemaker-model-package"
+    model_package_group_name = "sagemaker-model-package-group"
+    with pytest.raises(ValueError) as error:
+        sagemaker_session.create_model_package_from_containers(
+            model_package_name=model_package_name,
+            model_package_group_name=model_package_group_name,
+        )
+        assert (
+            "model_package_name and model_package_group_name cannot be present at the same "
+            "time." == str(error)
+        )
+
+
+def test_create_model_package_from_containers_incomplete_args(sagemaker_session):
+    model_package_name = "sagemaker-model-package"
+    containers = ["dummy-container"]
+    with pytest.raises(ValueError) as error:
+        sagemaker_session.create_model_package_from_containers(
+            model_package_name=model_package_name,
+            containers=containers,
+        )
+        assert (
+            "content_types, response_types, inference_inferences and transform_instances "
+            "must be provided if containers is present." == str(error)
+        )
+
+
+def test_create_model_package_from_containers_all_args(sagemaker_session):
+    model_package_name = "sagemaker-model-package"
+    containers = ["dummy-container"]
+    content_types = ["application/json"]
+    response_types = ["application/json"]
+    inference_instances = ["ml.m4.xlarge"]
+    transform_instances = ["ml.m4.xlarget"]
+    model_metrics = {
+        "Bias": {
+            "ContentType": "content-type",
+            "S3Uri": "s3://...",
+        }
+    }
+    metadata_properties = {
+        "CommitId": "test-commit-id",
+        "Repository": "test-repository",
+        "GeneratedBy": "sagemaker-python-sdk",
+        "ProjectId": "unit-test",
+    }
+    marketplace_cert = (True,)
+    approval_status = ("Approved",)
+    description = "description"
+    sagemaker_session.create_model_package_from_containers(
+        containers=containers,
+        content_types=content_types,
+        response_types=response_types,
+        inference_instances=inference_instances,
+        transform_instances=transform_instances,
+        model_package_name=model_package_name,
+        model_metrics=model_metrics,
+        metadata_properties=metadata_properties,
+        marketplace_cert=marketplace_cert,
+        approval_status=approval_status,
+        description=description,
+    )
+    expected_args = {
+        "ModelPackageName": model_package_name,
+        "InferenceSpecification": {
+            "Containers": containers,
+            "SupportedContentTypes": content_types,
+            "SupportedResponseMIMETypes": response_types,
+            "SupportedRealtimeInferenceInstanceTypes": inference_instances,
+            "SupportedTransformInstanceTypes": transform_instances,
+        },
+        "ModelPackageDescription": description,
+        "ModelMetrics": model_metrics,
+        "MetadataProperties": metadata_properties,
+        "CertifyForMarketplace": marketplace_cert,
+        "ModelApprovalStatus": approval_status,
+    }
+    sagemaker_session.sagemaker_client.create_model_package.assert_called_with(**expected_args)
+
+
+@pytest.fixture
+def feature_group_dummy_definitions():
+    return [{"FeatureName": "feature1", "FeatureType": "String"}]
+
+
+def test_feature_group_create(sagemaker_session, feature_group_dummy_definitions):
+    sagemaker_session.create_feature_group(
+        feature_group_name="MyFeatureGroup",
+        record_identifier_name="feature1",
+        event_time_feature_name="feature2",
+        feature_definitions=feature_group_dummy_definitions,
+        role_arn="dummy_role",
+    )
+    assert sagemaker_session.sagemaker_client.create_feature_group.called_with(
+        FeatureGroupName="MyFeatureGroup",
+        RecordIdentifierFeatureName="feature1",
+        EventTimeFeatureName="feature2",
+        FeatureDefinitions=feature_group_dummy_definitions,
+        RoleArn="dummy_role",
+    )
+
+
+def test_feature_group_delete(sagemaker_session):
+    sagemaker_session.delete_feature_group(feature_group_name="MyFeatureGroup")
+    assert sagemaker_session.sagemaker_client.delete_feature_group.called_with(
+        FeatureGroupName="MyFeatureGroup",
+    )
+
+
+def test_feature_group_describe(sagemaker_session):
+    sagemaker_session.describe_feature_group(feature_group_name="MyFeatureGroup")
+    assert sagemaker_session.sagemaker_client.describe_feature_group.called_with(
+        FeatureGroupName="MyFeatureGroup",
+    )
+
+
+def test_start_query_execution(sagemaker_session):
+    athena_mock = Mock()
+    sagemaker_session.boto_session.client(
+        "athena", region_name=sagemaker_session.boto_region_name
+    ).return_value = athena_mock
+    sagemaker_session.start_query_execution(
+        catalog="catalog",
+        database="database",
+        query_string="query",
+        output_location="s3://results",
+    )
+    assert athena_mock.start_query_execution.called_once_with(
+        QueryString="query",
+        QueryExecutionContext={"Catalog": "catalog", "Database": "database"},
+        OutputLocation="s3://results",
+    )
+
+
+def test_get_query_execution(sagemaker_session):
+    athena_mock = Mock()
+    sagemaker_session.boto_session.client(
+        "athena", region_name=sagemaker_session.boto_region_name
+    ).return_value = athena_mock
+    sagemaker_session.get_query_execution(query_execution_id="query_id")
+    assert athena_mock.get_query_execution.called_with(QueryExecutionId="query_id")
+
+
+def test_download_athena_query_result(sagemaker_session):
+    sagemaker_session.s3_client = Mock()
+    sagemaker_session.download_athena_query_result(
+        bucket="bucket",
+        prefix="prefix",
+        query_execution_id="query_id",
+        filename="filename",
+    )
+    assert sagemaker_session.s3_client.download_file.called_with(
+        Bucket="bucket",
+        Key="prefix/query_id.csv",
+        Filename="filename",
+    )
+
+
+@patch("sagemaker.session.Session.get_query_execution")
+def test_wait_for_athena_query(query_execution, sagemaker_session):
+    query_execution.return_value = {"QueryExecution": {"Status": {"State": "SUCCEEDED"}}}
+    sagemaker_session.wait_for_athena_query(query_execution_id="query_id")
+    assert query_execution.called_with(query_execution_id="query_id")

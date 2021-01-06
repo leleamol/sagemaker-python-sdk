@@ -16,14 +16,12 @@ from __future__ import absolute_import
 from abc import abstractmethod
 from six import string_types
 
-from sagemaker.inputs import FileSystemInput
+from sagemaker.inputs import FileSystemInput, TrainingInput
 from sagemaker.local import file_input
-from sagemaker.session import s3_input
 
 
 class _Job(object):
-    """Handle creating, starting and waiting for Amazon SageMaker jobs to
-    finish.
+    """Handle creating, starting and waiting for Amazon SageMaker jobs to finish.
 
     This class shouldn't be directly instantiated.
 
@@ -32,11 +30,7 @@ class _Job(object):
     """
 
     def __init__(self, sagemaker_session, job_name):
-        """
-        Args:
-            sagemaker_session:
-            job_name:
-        """
+        """Placeholder docstring"""
         self.sagemaker_session = sagemaker_session
         self.job_name = job_name
 
@@ -69,13 +63,7 @@ class _Job(object):
 
     @staticmethod
     def _load_config(inputs, estimator, expand_role=True, validate_uri=True):
-        """
-        Args:
-            inputs:
-            estimator:
-            expand_role:
-            validate_uri:
-        """
+        """Placeholder docstring"""
         input_config = _Job._format_inputs_to_input_config(inputs, validate_uri)
         role = (
             estimator.sagemaker_session.expand_role(estimator.role)
@@ -84,14 +72,12 @@ class _Job(object):
         )
         output_config = _Job._prepare_output_config(estimator.output_path, estimator.output_kms_key)
         resource_config = _Job._prepare_resource_config(
-            estimator.train_instance_count,
-            estimator.train_instance_type,
-            estimator.train_volume_size,
-            estimator.train_volume_kms_key,
+            estimator.instance_count,
+            estimator.instance_type,
+            estimator.volume_size,
+            estimator.volume_kms_key,
         )
-        stop_condition = _Job._prepare_stop_condition(
-            estimator.train_max_run, estimator.train_max_wait
-        )
+        stop_condition = _Job._prepare_stop_condition(estimator.max_run, estimator.max_wait)
         vpc_config = estimator.get_vpc_config()
 
         model_channel = _Job._prepare_channel(
@@ -126,11 +112,7 @@ class _Job(object):
 
     @staticmethod
     def _format_inputs_to_input_config(inputs, validate_uri=True):
-        """
-        Args:
-            inputs:
-            validate_uri:
-        """
+        """Placeholder docstring"""
         if inputs is None:
             return None
 
@@ -144,7 +126,7 @@ class _Job(object):
         input_dict = {}
         if isinstance(inputs, string_types):
             input_dict["training"] = _Job._format_string_uri_input(inputs, validate_uri)
-        elif isinstance(inputs, s3_input):
+        elif isinstance(inputs, TrainingInput):
             input_dict["training"] = inputs
         elif isinstance(inputs, file_input):
             input_dict["training"] = inputs
@@ -156,7 +138,10 @@ class _Job(object):
         elif isinstance(inputs, FileSystemInput):
             input_dict["training"] = inputs
         else:
-            msg = "Cannot format input {}. Expecting one of str, dict, s3_input or FileSystemInput"
+            msg = (
+                "Cannot format input {}. Expecting one of str, dict, TrainingInput or "
+                "FileSystemInput"
+            )
             raise ValueError(msg.format(inputs))
 
         channels = [
@@ -167,11 +152,7 @@ class _Job(object):
 
     @staticmethod
     def _convert_input_to_channel(channel_name, channel_s3_input):
-        """
-        Args:
-            channel_name:
-            channel_s3_input:
-        """
+        """Placeholder docstring"""
         channel_config = channel_s3_input.config.copy()
         channel_config["ChannelName"] = channel_name
         return channel_config
@@ -185,17 +166,9 @@ class _Job(object):
         compression=None,
         target_attribute_name=None,
     ):
-        """
-        Args:
-            uri_input:
-            validate_uri:
-            content_type:
-            input_mode:
-            compression:
-            target_attribute_name:
-        """
+        """Placeholder docstring"""
         if isinstance(uri_input, str) and validate_uri and uri_input.startswith("s3://"):
-            s3_input_result = s3_input(
+            s3_input_result = TrainingInput(
                 uri_input,
                 content_type=content_type,
                 input_mode=input_mode,
@@ -211,7 +184,7 @@ class _Job(object):
                 '"file://"'.format(uri_input)
             )
         if isinstance(uri_input, str):
-            s3_input_result = s3_input(
+            s3_input_result = TrainingInput(
                 uri_input,
                 content_type=content_type,
                 input_mode=input_mode,
@@ -219,11 +192,11 @@ class _Job(object):
                 target_attribute_name=target_attribute_name,
             )
             return s3_input_result
-        if isinstance(uri_input, (s3_input, file_input, FileSystemInput)):
+        if isinstance(uri_input, (TrainingInput, file_input, FileSystemInput)):
             return uri_input
 
         raise ValueError(
-            "Cannot format input {}. Expecting one of str, s3_input, file_input or "
+            "Cannot format input {}. Expecting one of str, TrainingInput, file_input or "
             "FileSystemInput".format(uri_input)
         )
 
@@ -236,15 +209,7 @@ class _Job(object):
         content_type=None,
         input_mode=None,
     ):
-        """
-        Args:
-            input_config:
-            channel_uri:
-            channel_name:
-            validate_uri:
-            content_type:
-            input_mode:
-        """
+        """Placeholder docstring"""
         if not channel_uri:
             return None
         if not channel_name:
@@ -266,13 +231,9 @@ class _Job(object):
 
     @staticmethod
     def _format_model_uri_input(model_uri, validate_uri=True):
-        """
-        Args:
-            model_uri:
-            validate_uri:
-        """
+        """Placeholder docstring"""
         if isinstance(model_uri, string_types) and validate_uri and model_uri.startswith("s3://"):
-            return s3_input(
+            return TrainingInput(
                 model_uri,
                 input_mode="File",
                 distribution="FullyReplicated",
@@ -285,7 +246,7 @@ class _Job(object):
                 'Model URI must be a valid S3 or FILE URI: must start with "s3://" or ' '"file://'
             )
         if isinstance(model_uri, string_types):
-            return s3_input(
+            return TrainingInput(
                 model_uri,
                 input_mode="File",
                 distribution="FullyReplicated",
@@ -295,10 +256,7 @@ class _Job(object):
 
     @staticmethod
     def _format_record_set_list_input(inputs):
-        """
-        Args:
-            inputs:
-        """
+        """Placeholder docstring"""
         # Deferred import due to circular dependency
         from sagemaker.amazon.amazon_estimator import FileSystemRecordSet, RecordSet
 
@@ -318,42 +276,28 @@ class _Job(object):
 
     @staticmethod
     def _prepare_output_config(s3_path, kms_key_id):
-        """
-        Args:
-            s3_path:
-            kms_key_id:
-        """
+        """Placeholder docstring"""
         config = {"S3OutputPath": s3_path}
         if kms_key_id is not None:
             config["KmsKeyId"] = kms_key_id
         return config
 
     @staticmethod
-    def _prepare_resource_config(instance_count, instance_type, volume_size, train_volume_kms_key):
-        """
-        Args:
-            instance_count:
-            instance_type:
-            volume_size:
-            train_volume_kms_key:
-        """
+    def _prepare_resource_config(instance_count, instance_type, volume_size, volume_kms_key):
+        """Placeholder docstring"""
         resource_config = {
             "InstanceCount": instance_count,
             "InstanceType": instance_type,
             "VolumeSizeInGB": volume_size,
         }
-        if train_volume_kms_key is not None:
-            resource_config["VolumeKmsKeyId"] = train_volume_kms_key
+        if volume_kms_key is not None:
+            resource_config["VolumeKmsKeyId"] = volume_kms_key
 
         return resource_config
 
     @staticmethod
     def _prepare_stop_condition(max_run, max_wait):
-        """
-        Args:
-            max_run:
-            max_wait:
-        """
+        """Placeholder docstring"""
         if max_wait:
             return {"MaxRuntimeInSeconds": max_run, "MaxWaitTimeInSeconds": max_wait}
         return {"MaxRuntimeInSeconds": max_run}

@@ -14,68 +14,85 @@
 from __future__ import absolute_import
 
 import io
+import logging
 import struct
 import sys
 
 import numpy as np
-from scipy.sparse import issparse
 
 from sagemaker.amazon.record_pb2 import Record
+from sagemaker.deprecations import deprecated_class
+from sagemaker.deserializers import SimpleBaseDeserializer
+from sagemaker.serializers import SimpleBaseSerializer
+from sagemaker.utils import DeferredError
 
 
-class numpy_to_record_serializer(object):
-    """Placeholder docstring"""
+class RecordSerializer(SimpleBaseSerializer):
+    """Serialize a NumPy array for an inference request."""
 
     def __init__(self, content_type="application/x-recordio-protobuf"):
-        """
+        """Initialize a ``RecordSerializer`` instance.
+
         Args:
-            content_type:
+            content_type (str): The MIME type to signal to the inference endpoint when sending
+                request data (default: "application/x-recordio-protobuf").
         """
-        self.content_type = content_type
+        super(RecordSerializer, self).__init__(content_type=content_type)
 
-    def __call__(self, array):
-        """
+    def serialize(self, data):
+        """Serialize a NumPy array into a buffer containing RecordIO records.
+
         Args:
-            array:
+            data (numpy.ndarray): The data to serialize.
+
+        Returns:
+            io.BytesIO: A buffer containing the data serialized as records.
         """
-        if len(array.shape) == 1:
-            array = array.reshape(1, array.shape[0])
-        assert len(array.shape) == 2, "Expecting a 1 or 2 dimensional array"
-        buf = io.BytesIO()
-        write_numpy_to_dense_tensor(buf, array)
-        buf.seek(0)
-        return buf
+        if len(data.shape) == 1:
+            data = data.reshape(1, data.shape[0])
+
+        if len(data.shape) != 2:
+            raise ValueError(
+                "Expected a 1D or 2D array, but got a %dD array instead." % len(data.shape)
+            )
+
+        buffer = io.BytesIO()
+        write_numpy_to_dense_tensor(buffer, data)
+        buffer.seek(0)
+
+        return buffer
 
 
-class record_deserializer(object):
-    """Placeholder docstring"""
+class RecordDeserializer(SimpleBaseDeserializer):
+    """Deserialize RecordIO Protobuf data from an inference endpoint."""
 
     def __init__(self, accept="application/x-recordio-protobuf"):
-        """
-        Args:
-            accept:
-        """
-        self.accept = accept
+        """Initialize a ``RecordDeserializer`` instance.
 
-    def __call__(self, stream, content_type):
-        """
         Args:
-            stream:
-            content_type:
+            accept (union[str, tuple[str]]): The MIME type (or tuple of allowable MIME types) that
+                is expected from the inference endpoint (default:
+                "application/x-recordio-protobuf").
+        """
+        super(RecordDeserializer, self).__init__(accept=accept)
+
+    def deserialize(self, data, content_type):
+        """Deserialize RecordIO Protobuf data from an inference endpoint.
+
+        Args:
+            data (object): The protobuf message to deserialize.
+            content_type (str): The MIME type of the data.
+        Returns:
+            list: A list of records.
         """
         try:
-            return read_records(stream)
+            return read_records(data)
         finally:
-            stream.close()
+            data.close()
 
 
 def _write_feature_tensor(resolved_type, record, vector):
-    """
-    Args:
-        resolved_type:
-        record:
-        vector:
-    """
+    """Placeholder Docstring"""
     if resolved_type == "Int32":
         record.features["values"].int32_tensor.values.extend(vector)
     elif resolved_type == "Float64":
@@ -85,12 +102,7 @@ def _write_feature_tensor(resolved_type, record, vector):
 
 
 def _write_label_tensor(resolved_type, record, scalar):
-    """
-    Args:
-        resolved_type:
-        record:
-        scalar:
-    """
+    """Placeholder Docstring"""
     if resolved_type == "Int32":
         record.label["values"].int32_tensor.values.extend([scalar])
     elif resolved_type == "Float64":
@@ -100,12 +112,7 @@ def _write_label_tensor(resolved_type, record, scalar):
 
 
 def _write_keys_tensor(resolved_type, record, vector):
-    """
-    Args:
-        resolved_type:
-        record:
-        vector:
-    """
+    """Placeholder Docstring"""
     if resolved_type == "Int32":
         record.features["values"].int32_tensor.keys.extend(vector)
     elif resolved_type == "Float64":
@@ -115,12 +122,7 @@ def _write_keys_tensor(resolved_type, record, vector):
 
 
 def _write_shape(resolved_type, record, scalar):
-    """
-    Args:
-        resolved_type:
-        record:
-        scalar:
-    """
+    """Placeholder Docstring"""
     if resolved_type == "Int32":
         record.features["values"].int32_tensor.shape.extend([scalar])
     elif resolved_type == "Float64":
@@ -171,8 +173,16 @@ def write_spmatrix_to_sparse_tensor(file, array, labels=None):
         array:
         labels:
     """
+    try:
+        import scipy
+    except ImportError as e:
+        logging.warning(
+            "scipy failed to import. Sparse matrix functions will be impaired or broken."
+        )
+        # Any subsequent attempt to use scipy will raise the ImportError
+        scipy = DeferredError(e)
 
-    if not issparse(array):
+    if not scipy.sparse.issparse(array):
         raise TypeError("Array must be sparse")
 
     # Validate shape of array and labels, resolve array and label types
@@ -255,17 +265,14 @@ def _write_recordio(f, data):
 
 
 def read_recordio(f):
-    """
-    Args:
-        f:
-    """
+    """Placeholder Docstring"""
     while True:
         try:
-            read_kmagic, = struct.unpack("I", f.read(4))
+            (read_kmagic,) = struct.unpack("I", f.read(4))
         except struct.error:
             return
         assert read_kmagic == _kmagic
-        len_record, = struct.unpack("I", f.read(4))
+        (len_record,) = struct.unpack("I", f.read(4))
         pad = (((len_record + 3) >> 2) << 2) - len_record
         yield f.read(len_record)
         if pad:
@@ -273,10 +280,7 @@ def read_recordio(f):
 
 
 def _resolve_type(dtype):
-    """
-    Args:
-        dtype:
-    """
+    """Placeholder Docstring"""
     if dtype == np.dtype(int):
         return "Int32"
     if dtype == np.dtype(float):
@@ -284,3 +288,7 @@ def _resolve_type(dtype):
     if dtype == np.dtype("float32"):
         return "Float32"
     raise ValueError("Unsupported dtype {} on array".format(dtype))
+
+
+numpy_to_record_serializer = deprecated_class(RecordSerializer, "numpy_to_record_serializer")
+record_deserializer = deprecated_class(RecordDeserializer, "record_deserializer")

@@ -14,36 +14,7 @@
 from __future__ import absolute_import
 
 import pkg_resources
-import sys
 from datetime import datetime
-from unittest.mock import MagicMock
-
-
-class Mock(MagicMock):
-    @classmethod
-    def __getattr__(cls, name):
-        """
-        Args:
-            name:
-        """
-        if name == "__version__":
-            return "1.4.0"
-        else:
-            return MagicMock()
-
-
-MOCK_MODULES = [
-    "tensorflow",
-    "tensorflow.core",
-    "tensorflow.core.framework",
-    "tensorflow.python",
-    "tensorflow.python.framework",
-    "tensorflow_serving",
-    "tensorflow_serving.apis",
-    "scipy",
-    "scipy.sparse",
-]
-sys.modules.update((mod_name, Mock()) for mod_name in MOCK_MODULES)
 
 project = u"sagemaker"
 version = pkg_resources.require(project)[0].version
@@ -89,6 +60,8 @@ html_static_path = ["_static"]
 htmlhelp_basename = "%sdoc" % project
 
 html_js_files = ["https://a0.awsstatic.com/s_code/js/1.0/awshome_s_code.js", "js/analytics.js"]
+
+html_context = {"css_files": ["_static/theme_overrides.css"]}
 
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {"http://docs.python.org/": None}

@@ -17,27 +17,35 @@ import logging
 import packaging.version
 
 import sagemaker
+from sagemaker import image_uris
+from sagemaker.deserializers import NumpyDeserializer
 from sagemaker.fw_utils import (
-    create_image_uri,
     model_code_key_prefix,
     python_deprecation_warning,
-    empty_framework_version_warning,
+    validate_version_or_image_args,
 )
 from sagemaker.model import FrameworkModel, MODEL_SERVER_WORKERS_PARAM_NAME
 from sagemaker.pytorch import defaults
-from sagemaker.predictor import RealTimePredictor, npy_serializer, numpy_deserializer
+from sagemaker.predictor import Predictor
+from sagemaker.serializers import NumpySerializer
 
 logger = logging.getLogger("sagemaker")
 
 
-class PyTorchPredictor(RealTimePredictor):
-    """A RealTimePredictor for inference against PyTorch Endpoints.
+class PyTorchPredictor(Predictor):
+    """A Predictor for inference against PyTorch Endpoints.
 
     This is able to serialize Python lists, dictionaries, and numpy arrays to
     multidimensional tensors for PyTorch inference.
     """
 
-    def __init__(self, endpoint_name, sagemaker_session=None):
+    def __init__(
+        self,
+        endpoint_name,
+        sagemaker_session=None,
+        serializer=NumpySerializer(),
+        deserializer=NumpyDeserializer(),
+    ):
         """Initialize an ``PyTorchPredictor``.
 
         Args:
@@ -47,18 +55,24 @@ class PyTorchPredictor(RealTimePredictor):
                 manages interactions with Amazon SageMaker APIs and any other
                 AWS services needed. If not specified, the estimator creates one
                 using the default AWS configuration chain.
+            serializer (sagemaker.serializers.BaseSerializer): Optional. Default
+                serializes input data to .npy format. Handles lists and numpy
+                arrays.
+            deserializer (sagemaker.deserializers.BaseDeserializer): Optional.
+                Default parses the response from .npy format to numpy array.
         """
         super(PyTorchPredictor, self).__init__(
-            endpoint_name, sagemaker_session, npy_serializer, numpy_deserializer
+            endpoint_name,
+            sagemaker_session,
+            serializer=serializer,
+            deserializer=deserializer,
         )
 
 
 class PyTorchModel(FrameworkModel):
-    """An PyTorch SageMaker ``Model`` that can be deployed to a SageMaker
-    ``Endpoint``.
-    """
+    """An PyTorch SageMaker ``Model`` that can be deployed to a SageMaker ``Endpoint``."""
 
-    __framework_name__ = "pytorch"
+    _framework_name = "pytorch"
     _LOWEST_MMS_VERSION = "1.2"
 
     def __init__(
@@ -66,14 +80,14 @@ class PyTorchModel(FrameworkModel):
         model_data,
         role,
         entry_point,
-        image=None,
-        py_version=defaults.PYTHON_VERSION,
         framework_version=None,
+        py_version=None,
+        image_uri=None,
         predictor_cls=PyTorchPredictor,
         model_server_workers=None,
         **kwargs
     ):
-        """Initialize an PyTorchModel.
+        """Initialize a PyTorchModel.
 
         Args:
             model_data (str): The S3 location of a SageMaker model data
@@ -87,12 +101,16 @@ class PyTorchModel(FrameworkModel):
                 file which should be executed as the entry point to model
                 hosting. If ``source_dir`` is specified, then ``entry_point``
                 must point to a file located at the root of ``source_dir``.
-            image (str): A Docker image URI (default: None). If not specified, a
-                default image for PyTorch will be used.
-            py_version (str): Python version you want to use for executing your
-                model training code (default: 'py3').
             framework_version (str): PyTorch version you want to use for
-                executing your model training code.
+                executing your model training code. Defaults to None. Required
+                unless ``image_uri`` is provided.
+            py_version (str): Python version you want to use for executing your
+                model training code. Defaults to ``None``. Required unless
+                ``image_uri`` is provided.
+            image_uri (str): A Docker image URI (default: None). If not specified, a
+                default image for PyTorch will be used. If ``framework_version``
+                or ``py_version`` are ``None``, then ``image_uri`` is required. If
+                also ``None``, then a ``ValueError`` will be raised.
             predictor_cls (callable[str, sagemaker.session.Session]): A function
                 to call to create a predictor with an endpoint name and
                 SageMaker ``Session``. If specified, ``deploy()`` returns the
@@ -100,8 +118,9 @@ class PyTorchModel(FrameworkModel):
             model_server_workers (int): Optional. The number of worker processes
                 used by the inference server. If None, server will use one
                 worker per vCPU.
-            **kwargs: Keyword arguments passed to the ``FrameworkModel``
-                initializer.
+            **kwargs: Keyword arguments passed to the superclass
+                :class:`~sagemaker.model.FrameworkModel` and, subsequently, its
+                superclass :class:`~sagemaker.model.Model`.
 
         .. tip::
 
@@ -109,27 +128,89 @@ class PyTorchModel(FrameworkModel):
             :class:`~sagemaker.model.FrameworkModel` and
             :class:`~sagemaker.model.Model`.
         """
-        super(PyTorchModel, self).__init__(
-            model_data, image, role, entry_point, predictor_cls=predictor_cls, **kwargs
-        )
-
+        validate_version_or_image_args(framework_version, py_version, image_uri)
         if py_version == "py2":
             logger.warning(
-                python_deprecation_warning(self.__framework_name__, defaults.LATEST_PY2_VERSION)
+                python_deprecation_warning(self._framework_name, defaults.LATEST_PY2_VERSION)
             )
-
-        if framework_version is None:
-            logger.warning(
-                empty_framework_version_warning(defaults.PYTORCH_VERSION, defaults.LATEST_VERSION)
-            )
-
+        self.framework_version = framework_version
         self.py_version = py_version
-        self.framework_version = framework_version or defaults.PYTORCH_VERSION
+
+        super(PyTorchModel, self).__init__(
+            model_data, image_uri, role, entry_point, predictor_cls=predictor_cls, **kwargs
+        )
+
         self.model_server_workers = model_server_workers
 
-    def prepare_container_def(self, instance_type, accelerator_type=None):
-        """Return a container definition with framework configuration set in
-        model environment variables.
+    def register(
+        self,
+        content_types,
+        response_types,
+        inference_instances,
+        transform_instances,
+        model_package_name=None,
+        model_package_group_name=None,
+        image_uri=None,
+        model_metrics=None,
+        metadata_properties=None,
+        marketplace_cert=False,
+        approval_status=None,
+        description=None,
+    ):
+        """Creates a model package for creating SageMaker models or listing on Marketplace.
+
+        Args:
+            content_types (list): The supported MIME types for the input data.
+            response_types (list): The supported MIME types for the output data.
+            inference_instances (list): A list of the instance types that are used to
+                generate inferences in real-time.
+            transform_instances (list): A list of the instance types on which a transformation
+                job can be run or on which an endpoint can be deployed.
+            model_package_name (str): Model Package name, exclusive to `model_package_group_name`,
+                using `model_package_name` makes the Model Package un-versioned (default: None).
+            model_package_group_name (str): Model Package Group name, exclusive to
+                `model_package_name`, using `model_package_group_name` makes the Model Package
+                versioned (default: None).
+            image_uri (str): Inference image uri for the container. Model class' self.image will
+                be used if it is None (default: None).
+            model_metrics (ModelMetrics): ModelMetrics object (default: None).
+            metadata_properties (MetadataProperties): MetadataProperties object (default: None).
+            marketplace_cert (bool): A boolean value indicating if the Model Package is certified
+                for AWS Marketplace (default: False).
+            approval_status (str): Model Approval Status, values can be "Approved", "Rejected",
+                or "PendingManualApproval" (default: "PendingManualApproval").
+            description (str): Model Package description (default: None).
+
+        Returns:
+            str: A string of SageMaker Model Package ARN.
+        """
+        instance_type = inference_instances[0]
+        self._init_sagemaker_session_if_does_not_exist(instance_type)
+
+        if image_uri:
+            self.image_uri = image_uri
+        if not self.image_uri:
+            self.image_uri = self.serving_image_uri(
+                region_name=self.sagemaker_session.boto_session.region_name,
+                instance_type=instance_type,
+            )
+        return super(PyTorchModel, self).register(
+            content_types,
+            response_types,
+            inference_instances,
+            transform_instances,
+            model_package_name,
+            model_package_group_name,
+            image_uri,
+            model_metrics,
+            metadata_properties,
+            marketplace_cert,
+            approval_status,
+            description,
+        )
+
+    def prepare_container_def(self, instance_type=None, accelerator_type=None):
+        """A container definition with framework configuration set in model environment variables.
 
         Args:
             instance_type (str): The EC2 instance type to deploy this Model to.
@@ -142,8 +223,13 @@ class PyTorchModel(FrameworkModel):
             dict[str, str]: A container definition object usable with the
             CreateModel API.
         """
-        deploy_image = self.image
+        deploy_image = self.image_uri
         if not deploy_image:
+            if instance_type is None:
+                raise ValueError(
+                    "Must supply either an instance type (for choosing CPU vs GPU) or an image URI."
+                )
+
             region_name = self.sagemaker_session.boto_session.region_name
             deploy_image = self.serving_image_uri(
                 region_name, instance_type, accelerator_type=accelerator_type
@@ -175,21 +261,20 @@ class PyTorchModel(FrameworkModel):
             str: The appropriate image URI based on the given parameters.
 
         """
-        framework_name = self.__framework_name__
-        if self._is_mms_version():
-            framework_name = "{}-serving".format(framework_name)
-
-        return create_image_uri(
+        return image_uris.retrieve(
+            self._framework_name,
             region_name,
-            framework_name,
-            instance_type,
-            self.framework_version,
-            self.py_version,
+            version=self.framework_version,
+            py_version=self.py_version,
+            instance_type=instance_type,
             accelerator_type=accelerator_type,
+            image_scope="inference",
         )
 
     def _is_mms_version(self):
-        """Whether the framework version corresponds to an inference image using
+        """Determines if the framework corresponds to an and using MMS.
+
+        Whether the framework version corresponds to an inference image using
         the Multi-Model Server (https://github.com/awslabs/multi-model-server).
 
         Returns:

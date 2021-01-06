@@ -18,8 +18,16 @@ import logging
 import os
 
 import sagemaker
-from sagemaker import fw_utils, local, session, utils, git_utils
-from sagemaker.fw_utils import UploadedCode
+from sagemaker import (
+    fw_utils,
+    image_uris,
+    local,
+    s3,
+    session,
+    utils,
+    git_utils,
+)
+from sagemaker.deprecations import removed_kwargs
 from sagemaker.transformer import Transformer
 
 LOGGER = logging.getLogger("sagemaker")
@@ -28,40 +36,14 @@ NEO_ALLOWED_FRAMEWORKS = set(
     ["mxnet", "tensorflow", "keras", "pytorch", "onnx", "xgboost", "tflite"]
 )
 
-NEO_IMAGE_ACCOUNT = {
-    "us-west-1": "710691900526",
-    "us-west-2": "301217895009",
-    "us-east-1": "785573368785",
-    "us-east-2": "007439368137",
-    "eu-west-1": "802834080501",
-    "eu-west-2": "205493899709",
-    "eu-west-3": "254080097072",
-    "eu-central-1": "746233611703",
-    "eu-north-1": "601324751636",
-    "ap-northeast-1": "941853720454",
-    "ap-northeast-2": "151534178276",
-    "ap-east-1": "110948597952",
-    "ap-southeast-1": "324986816169",
-    "ap-southeast-2": "355873309152",
-    "ap-south-1": "763008648453",
-    "sa-east-1": "756306329178",
-    "ca-central-1": "464438896020",
-    "me-south-1": "836785723513",
-    "cn-north-1": "472730292857",
-    "cn-northwest-1": "474822919863",
-    "us-gov-west-1": "263933020539",
-}
-
-INFERENTIA_INSTANCE_PREFIX = "ml_inf"
-
 
 class Model(object):
     """A SageMaker ``Model`` that can be deployed to an ``Endpoint``."""
 
     def __init__(
         self,
-        model_data,
-        image,
+        image_uri,
+        model_data=None,
         role=None,
         predictor_cls=None,
         env=None,
@@ -74,9 +56,9 @@ class Model(object):
         """Initialize an SageMaker ``Model``.
 
         Args:
+            image_uri (str): A Docker image URI.
             model_data (str): The S3 location of a SageMaker model data
-                ``.tar.gz`` file.
-            image (str): A Docker image URI.
+                ``.tar.gz`` file (default: None).
             role (str): An AWS IAM role (either name or full ARN). The Amazon
                 SageMaker training jobs and APIs that create Amazon SageMaker
                 endpoints use this role to access training data and model
@@ -89,7 +71,7 @@ class Model(object):
                 function to call to create a predictor (default: None). If not
                 None, ``deploy`` will return the result of invoking this
                 function on the created endpoint name.
-            env (dict[str, str]): Environment variables to run with ``image``
+            env (dict[str, str]): Environment variables to run with ``image_uri``
                 when hosted in SageMaker (default: None).
             name (str): The model name. If None, a default model name will be
                 selected on each ``deploy``.
@@ -108,26 +90,165 @@ class Model(object):
             model_kms_key (str): KMS key ARN used to encrypt the repacked
                 model archive file if the model is repacked
         """
-        LOGGER.warning(fw_utils.parameter_v2_rename_warning("image", "image_uri"))
-
         self.model_data = model_data
-        self.image = image
+        self.image_uri = image_uri
         self.role = role
         self.predictor_cls = predictor_cls
         self.env = env or {}
         self.name = name
+        self._base_name = None
         self.vpc_config = vpc_config
         self.sagemaker_session = sagemaker_session
-        self._model_name = None
         self.endpoint_name = None
         self._is_compiled_model = False
+        self._compilation_job_name = None
+        self._is_edge_packaged_model = False
         self._enable_network_isolation = enable_network_isolation
         self.model_kms_key = model_kms_key
 
+    def register(
+        self,
+        content_types,
+        response_types,
+        inference_instances,
+        transform_instances,
+        model_package_name=None,
+        model_package_group_name=None,
+        image_uri=None,
+        model_metrics=None,
+        metadata_properties=None,
+        marketplace_cert=False,
+        approval_status=None,
+        description=None,
+    ):
+        """Creates a model package for creating SageMaker models or listing on Marketplace.
+
+        Args:
+            content_types (list): The supported MIME types for the input data (default: None).
+            response_types (list): The supported MIME types for the output data (default: None).
+            inference_instances (list): A list of the instance types that are used to
+                generate inferences in real-time (default: None).
+            transform_instances (list): A list of the instance types on which a transformation
+                job can be run or on which an endpoint can be deployed (default: None).
+            model_package_name (str): Model Package name, exclusive to `model_package_group_name`,
+                using `model_package_name` makes the Model Package un-versioned (default: None).
+            model_package_group_name (str): Model Package Group name, exclusive to
+                `model_package_name`, using `model_package_group_name` makes the Model Package
+                versioned (default: None).
+            image_uri (str): Inference image uri for the container. Model class' self.image will
+                be used if it is None (default: None).
+            model_metrics (ModelMetrics): ModelMetrics object (default: None).
+            metadata_properties (MetadataProperties): MetadataProperties object (default: None).
+            marketplace_cert (bool): A boolean value indicating if the Model Package is certified
+                for AWS Marketplace (default: False).
+            approval_status (str): Model Approval Status, values can be "Approved", "Rejected",
+                or "PendingManualApproval" (default: "PendingManualApproval").
+            description (str): Model Package description (default: None).
+
+        Returns:
+            str: A string of SageMaker Model Package ARN.
+        """
+        if self.model_data is None:
+            raise ValueError("SageMaker Model Package cannot be created without model data.")
+
+        model_pkg_args = self._get_model_package_args(
+            content_types,
+            response_types,
+            inference_instances,
+            transform_instances,
+            model_package_name,
+            model_package_group_name,
+            image_uri,
+            model_metrics,
+            metadata_properties,
+            marketplace_cert,
+            approval_status,
+            description,
+        )
+        model_package = self.sagemaker_session.create_model_package_from_containers(
+            **model_pkg_args
+        )
+        return ModelPackage(
+            role=self.role,
+            model_data=self.model_data,
+            model_package_arn=model_package.get("ModelPackageArn"),
+        )
+
+    def _get_model_package_args(
+        self,
+        content_types,
+        response_types,
+        inference_instances,
+        transform_instances,
+        model_package_name=None,
+        model_package_group_name=None,
+        image_uri=None,
+        model_metrics=None,
+        metadata_properties=None,
+        marketplace_cert=False,
+        approval_status=None,
+        description=None,
+    ):
+        """Get arguments for session.create_model_package method.
+
+        Args:
+            content_types (list): The supported MIME types for the input data.
+            response_types (list): The supported MIME types for the output data.
+            inference_instances (list): A list of the instance types that are used to
+                generate inferences in real-time.
+            transform_instances (list): A list of the instance types on which a transformation
+                job can be run or on which an endpoint can be deployed.
+            model_package_name (str): Model Package name, exclusive to `model_package_group_name`,
+                using `model_package_name` makes the Model Package un-versioned (default: None).
+            model_package_group_name (str): Model Package Group name, exclusive to
+                `model_package_name`, using `model_package_group_name` makes the Model Package
+                versioned (default: None).
+            image_uri (str): Inference image uri for the container. Model class' self.image will
+                be used if it is None (default: None).
+            model_metrics (ModelMetrics): ModelMetrics object (default: None).
+            metadata_properties (MetadataProperties): MetadataProperties object (default: None).
+            marketplace_cert (bool): A boolean value indicating if the Model Package is certified
+                for AWS Marketplace (default: False).
+            approval_status (str): Model Approval Status, values can be "Approved", "Rejected",
+                or "PendingManualApproval" (default: "PendingManualApproval").
+            description (str): Model Package description (default: None).
+        Returns:
+            dict: A dictionary of method argument names and values.
+        """
+        if image_uri:
+            self.image_uri = image_uri
+        container = {
+            "Image": self.image_uri,
+            "ModelDataUrl": self.model_data,
+        }
+
+        model_package_args = {
+            "containers": [container],
+            "content_types": content_types,
+            "response_types": response_types,
+            "inference_instances": inference_instances,
+            "transform_instances": transform_instances,
+            "marketplace_cert": marketplace_cert,
+        }
+
+        if model_package_name is not None:
+            model_package_args["model_package_name"] = model_package_name
+        if model_package_group_name is not None:
+            model_package_args["model_package_group_name"] = model_package_group_name
+        if model_metrics is not None:
+            model_package_args["model_metrics"] = model_metrics._to_request_dict()
+        if metadata_properties is not None:
+            model_package_args["metadata_properties"] = metadata_properties._to_request_dict()
+        if approval_status is not None:
+            model_package_args["approval_status"] = approval_status
+        if description is not None:
+            model_package_args["description"] = description
+        return model_package_args
+
     def _init_sagemaker_session_if_does_not_exist(self, instance_type):
-        """Set ``self.sagemaker_session`` to be a ``LocalSession`` or
-        ``Session`` if it is not already. The type of session object is
-        determined by the instance type.
+        """Set ``self.sagemaker_session`` to ``LocalSession`` or ``Session`` if it's not already.
+
+        The type of session object is determined by the instance type.
         """
         if self.sagemaker_session:
             return
@@ -138,10 +259,11 @@ class Model(object):
             self.sagemaker_session = session.Session()
 
     def prepare_container_def(
-        self, instance_type, accelerator_type=None
+        self, instance_type=None, accelerator_type=None
     ):  # pylint: disable=unused-argument
-        """Return a dict created by ``sagemaker.container_def()`` for deploying
-        this model to a specified instance type.
+        """Return a dict created by ``sagemaker.container_def()``.
+
+        It is used for deploying this model to a specified instance type.
 
         Subclasses can override this to provide custom container definitions
         for deployment to a specific instance type. Called by ``deploy()``.
@@ -156,7 +278,7 @@ class Model(object):
         Returns:
             dict: A container definition object usable with the CreateModel API.
         """
-        return sagemaker.container_def(self.image, self.model_data, self.env)
+        return sagemaker.container_def(self.image_uri, self.model_data, self.env)
 
     def enable_network_isolation(self):
         """Whether to enable network isolation when creating this Model
@@ -166,7 +288,7 @@ class Model(object):
         """
         return self._enable_network_isolation
 
-    def _create_sagemaker_model(self, instance_type, accelerator_type=None, tags=None):
+    def _create_sagemaker_model(self, instance_type=None, accelerator_type=None, tags=None):
         """Create a SageMaker Model Entity
 
         Args:
@@ -184,7 +306,10 @@ class Model(object):
                 /api/latest/reference/services/sagemaker.html#SageMaker.Client.add_tags
         """
         container_def = self.prepare_container_def(instance_type, accelerator_type=accelerator_type)
-        self.name = self.name or utils.name_from_image(container_def["Image"])
+
+        self._ensure_base_name_if_needed(container_def["Image"])
+        self._set_model_name_if_needed()
+
         enable_network_isolation = self.enable_network_isolation()
 
         self._init_sagemaker_session_if_does_not_exist(instance_type)
@@ -197,13 +322,67 @@ class Model(object):
             tags=tags,
         )
 
+    def _ensure_base_name_if_needed(self, image_uri):
+        """Create a base name from the image URI if there is no model name provided."""
+        if self.name is None:
+            self._base_name = self._base_name or utils.base_name_from_image(image_uri)
+
+    def _set_model_name_if_needed(self):
+        """Generate a new model name if ``self._base_name`` is present."""
+        if self._base_name:
+            self.name = utils.name_from_base(self._base_name)
+
     def _framework(self):
         """Placeholder docstring"""
-        return getattr(self, "__framework_name__", None)
+        return getattr(self, "_framework_name", None)
 
     def _get_framework_version(self):
         """Placeholder docstring"""
         return getattr(self, "framework_version", None)
+
+    def _edge_packaging_job_config(
+        self,
+        output_path,
+        role,
+        model_name,
+        model_version,
+        packaging_job_name,
+        compilation_job_name,
+        resource_key,
+        s3_kms_key,
+        tags,
+    ):
+        """Creates a request object for a packaging job.
+
+        Args:
+            output_path (str): where in S3 to store the output of the job
+            role (str): what role to use when executing the job
+            packaging_job_name (str): what to name the packaging job
+            compilation_job_name (str): what compilation job to source the model from
+            resource_key (str): the kms key to encrypt the disk with
+            s3_kms_key (str): the kms key to encrypt the output with
+            tags (list[dict]): List of tags for labeling an edge packaging job. For
+                more, see
+                https://docs.aws.amazon.com/sagemaker/latest/dg/API_Tag.html.
+        Returns:
+            dict: the request object to use when creating a packaging job
+        """
+        output_model_config = {
+            "S3OutputLocation": output_path,
+        }
+        if s3_kms_key is not None:
+            output_model_config["KmsKeyId"] = s3_kms_key
+
+        return {
+            "output_model_config": output_model_config,
+            "role": role,
+            "tags": tags,
+            "model_name": model_name,
+            "model_version": model_version,
+            "job_name": packaging_job_name,
+            "compilation_job_name": compilation_job_name,
+            "resource_key": resource_key,
+        }
 
     def _compilation_job_config(
         self,
@@ -215,30 +394,46 @@ class Model(object):
         job_name,
         framework,
         tags,
+        target_platform_os=None,
+        target_platform_arch=None,
+        target_platform_accelerator=None,
+        compiler_options=None,
     ):
-        """
-        Args:
-            target_instance_type:
-            input_shape:
-            output_path:
-            role:
-            compile_max_run:
-            job_name:
-            framework:
-            tags:
-        """
+        """Placeholder Docstring"""
         input_model_config = {
             "S3Uri": self.model_data,
-            "DataInputConfig": input_shape
-            if not isinstance(input_shape, dict)
-            else json.dumps(input_shape),
-            "Framework": framework,
+            "DataInputConfig": json.dumps(input_shape)
+            if isinstance(input_shape, dict)
+            else input_shape,
+            "Framework": framework.upper(),
         }
         role = self.sagemaker_session.expand_role(role)
         output_model_config = {
-            "TargetDevice": target_instance_type,
             "S3OutputLocation": output_path,
         }
+
+        if target_instance_type is not None:
+            output_model_config["TargetDevice"] = target_instance_type
+        else:
+            if target_platform_os is None and target_platform_arch is None:
+                raise ValueError(
+                    "target_instance_type or (target_platform_os and target_platform_arch) "
+                    "should be provided"
+                )
+            target_platform = {
+                "Os": target_platform_os,
+                "Arch": target_platform_arch,
+            }
+            if target_platform_accelerator is not None:
+                target_platform["Accelerator"] = target_platform_accelerator
+            output_model_config["TargetPlatform"] = target_platform
+
+        if compiler_options is not None:
+            output_model_config["CompilerOptions"] = (
+                json.dumps(compiler_options)
+                if isinstance(compiler_options, dict)
+                else compiler_options
+            )
 
         return {
             "input_model_config": input_model_config,
@@ -249,65 +444,91 @@ class Model(object):
             "job_name": job_name,
         }
 
-    def check_neo_region(self, region):
-        """Check if this ``Model`` in the available region where neo support.
+    def _compilation_image_uri(self, region, target_instance_type, framework, framework_version):
+        """Retrieve the Neo or Inferentia image URI.
 
         Args:
-            region (str): Specifies the region where want to execute compilation
+            region (str): The AWS region.
+            target_instance_type (str): Identifies the device on which you want to run
+                your model after compilation, for example: ml_c5. For valid values, see
+                https://docs.aws.amazon.com/sagemaker/latest/dg/API_OutputConfig.html.
+            framework (str): The framework name.
+            framework_version (str): The framework version.
+        """
+        framework_prefix = ""
+        framework_suffix = ""
+
+        if framework == "xgboost":
+            framework_suffix = "-neo"
+        elif target_instance_type.startswith("ml_inf"):
+            framework_prefix = "inferentia-"
+        else:
+            framework_prefix = "neo-"
+
+        return image_uris.retrieve(
+            "{}{}{}".format(framework_prefix, framework, framework_suffix),
+            region,
+            instance_type=target_instance_type,
+            version=framework_version,
+        )
+
+    def package_for_edge(
+        self,
+        output_path,
+        model_name,
+        model_version,
+        role=None,
+        job_name=None,
+        resource_key=None,
+        s3_kms_key=None,
+        tags=None,
+    ):
+        """Package this ``Model`` with SageMaker Edge.
+
+        Creates a new EdgePackagingJob and wait for it to finish.
+        model_data will now point to the packaged artifacts.
+
+        Args:
+            output_path (str): Specifies where to store the packaged model
+            role (str): Execution role
+            model_name (str): the name to attach to the model metadata
+            model_version (str): the version to attach to the model metadata
+            job_name (str): The name of the edge packaging job
+            resource_key (str): the kms key to encrypt the disk with
+            s3_kms_key (str): the kms key to encrypt the output with
+            tags (list[dict]): List of tags for labeling an edge packaging job. For
+                more, see
+                https://docs.aws.amazon.com/sagemaker/latest/dg/API_Tag.html.
 
         Returns:
-            bool: boolean value whether if neo is available in the specified
-            region
+            sagemaker.model.Model: A SageMaker ``Model`` object. See
+            :func:`~sagemaker.model.Model` for full details.
         """
-        if region in NEO_IMAGE_ACCOUNT:
-            return True
-        return False
+        if self._compilation_job_name is None:
+            raise ValueError("You must first compile this model")
+        if job_name is None:
+            job_name = f"packaging{self._compilation_job_name[11:]}"
+        if role is None:
+            role = self.sagemaker_session.expand_role(role)
 
-    def _neo_image_account(self, region):
-        """
-        Args:
-            region:
-        """
-        if region not in NEO_IMAGE_ACCOUNT:
-            raise ValueError(
-                "Neo is not currently supported in {}, "
-                "valid regions: {}".format(region, NEO_IMAGE_ACCOUNT.keys())
-            )
-        return NEO_IMAGE_ACCOUNT[region]
-
-    def _neo_image(self, region, target_instance_type, framework, framework_version):
-        """
-        Args:
-            region:
-            target_instance_type:
-            framework:
-            framework_version:
-        """
-        return fw_utils.create_image_uri(
-            region,
-            "neo-" + framework.lower(),
-            target_instance_type.replace("_", "."),
-            framework_version,
-            py_version="py3",
-            account=self._neo_image_account(region),
+        self._init_sagemaker_session_if_does_not_exist(None)
+        config = self._edge_packaging_job_config(
+            output_path,
+            role,
+            model_name,
+            model_version,
+            job_name,
+            self._compilation_job_name,
+            resource_key,
+            s3_kms_key,
+            tags,
         )
+        self.sagemaker_session.package_model_for_edge(**config)
+        job_status = self.sagemaker_session.wait_for_edge_packaging_job(job_name)
+        self.model_data = job_status["ModelArtifact"]
+        self._is_edge_packaged_model = True
 
-    def _inferentia_image(self, region, target_instance_type, framework, framework_version):
-        """
-                Args:
-                    region:
-                    target_instance_type:
-                    framework:
-                    framework_version:
-                """
-        return fw_utils.create_image_uri(
-            region,
-            "neo-" + framework.lower(),
-            target_instance_type.replace("_", "."),
-            framework_version,
-            py_version="py3",
-            account=self._neo_image_account(region),
-        )
+        return self
 
     def compile(
         self,
@@ -320,6 +541,10 @@ class Model(object):
         compile_max_run=5 * 60,
         framework=None,
         framework_version=None,
+        target_platform_os=None,
+        target_platform_arch=None,
+        target_platform_accelerator=None,
+        compiler_options=None,
     ):
         """Compile this ``Model`` with SageMaker Neo.
 
@@ -328,6 +553,9 @@ class Model(object):
                 run your model after compilation, for example: ml_c5. For allowed
                 strings see
                 https://docs.aws.amazon.com/sagemaker/latest/dg/API_OutputConfig.html.
+                Alternatively, you can select an OS, Architecture and Accelerator using
+                ``target_platform_os``, ``target_platform_arch``,
+                and ``target_platform_accelerator``.
             input_shape (dict): Specifies the name and shape of the expected
                 inputs for your trained model in json dictionary form, for
                 example: {'data': [1,3,1024,1024]}, or {'var1': [1,1,28,28],
@@ -345,12 +573,30 @@ class Model(object):
                 model. Allowed values: 'mxnet', 'tensorflow', 'keras', 'pytorch',
                 'onnx', 'xgboost'
             framework_version (str):
+            target_platform_os (str): Target Platform OS, for example: 'LINUX'.
+                For allowed strings see
+                https://docs.aws.amazon.com/sagemaker/latest/dg/API_OutputConfig.html.
+                It can be used instead of target_instance_family by setting target_instance
+                family to None.
+            target_platform_arch (str): Target Platform Architecture, for example: 'X86_64'.
+                For allowed strings see
+                https://docs.aws.amazon.com/sagemaker/latest/dg/API_OutputConfig.html.
+                It can be used instead of target_instance_family by setting target_instance
+                family to None.
+            target_platform_accelerator (str, optional): Target Platform Accelerator,
+                for example: 'NVIDIA'. For allowed strings see
+                https://docs.aws.amazon.com/sagemaker/latest/dg/API_OutputConfig.html.
+                It can be used instead of target_instance_family by setting target_instance
+                family to None.
+            compiler_options (dict, optional): Additional parameters for compiler.
+                Compiler Options are TargetPlatform / target_instance_family specific. See
+                https://docs.aws.amazon.com/sagemaker/latest/dg/API_OutputConfig.html for details.
 
         Returns:
             sagemaker.model.Model: A SageMaker ``Model`` object. See
             :func:`~sagemaker.model.Model` for full details.
         """
-        framework = self._framework() or framework
+        framework = framework or self._framework()
         if framework is None:
             raise ValueError(
                 "You must specify framework, allowed values {}".format(NEO_ALLOWED_FRAMEWORKS)
@@ -361,9 +607,10 @@ class Model(object):
             )
         if job_name is None:
             raise ValueError("You must provide a compilation job name")
+        if self.model_data is None:
+            raise ValueError("You must provide an S3 path to the compressed model artifacts.")
 
-        framework = framework.upper()
-        framework_version = self._get_framework_version() or framework_version
+        framework_version = framework_version or self._get_framework_version()
 
         self._init_sagemaker_session_if_does_not_exist(target_instance_family)
         config = self._compilation_job_config(
@@ -375,48 +622,55 @@ class Model(object):
             job_name,
             framework,
             tags,
+            target_platform_os,
+            target_platform_arch,
+            target_platform_accelerator,
+            compiler_options,
         )
         self.sagemaker_session.compile_model(**config)
         job_status = self.sagemaker_session.wait_for_compilation_job(job_name)
         self.model_data = job_status["ModelArtifacts"]["S3ModelArtifacts"]
-        if target_instance_family.startswith("ml_"):
-            self.image = self._neo_image(
-                self.sagemaker_session.boto_region_name,
-                target_instance_family,
-                framework,
-                framework_version,
-            )
-            self._is_compiled_model = True
-        elif target_instance_family.startswith(INFERENTIA_INSTANCE_PREFIX):
-            self.image = self._inferentia_image(
-                self.sagemaker_session.boto_region_name,
-                target_instance_family,
-                framework,
-                framework_version,
-            )
-            self._is_compiled_model = True
+
+        if target_instance_family is not None:
+            if target_instance_family.startswith("ml_"):
+                self.image_uri = self._compilation_image_uri(
+                    self.sagemaker_session.boto_region_name,
+                    target_instance_family,
+                    framework,
+                    framework_version,
+                )
+                self._is_compiled_model = True
+            else:
+                LOGGER.warning(
+                    "The instance type %s is not supported for deployment via SageMaker."
+                    "Please deploy the model manually.",
+                    target_instance_family,
+                )
         else:
             LOGGER.warning(
-                "The instance type %s is not supported to deploy via SageMaker,"
-                "please deploy the model manually.",
-                target_instance_family,
+                "Devices described by Target Platform OS, Architecture and Accelerator are not"
+                "supported for deployment via SageMaker. Please deploy the model manually."
             )
+
+        self._compilation_job_name = job_name
+
         return self
 
     def deploy(
         self,
         initial_instance_count,
         instance_type,
+        serializer=None,
+        deserializer=None,
         accelerator_type=None,
         endpoint_name=None,
-        update_endpoint=False,
         tags=None,
         kms_key=None,
         wait=True,
         data_capture_config=None,
+        **kwargs,
     ):
-        """Deploy this ``Model`` to an ``Endpoint`` and optionally return a
-        ``Predictor``.
+        """Deploy this ``Model`` to an ``Endpoint`` and optionally return a ``Predictor``.
 
         Create a SageMaker ``Model`` and ``EndpointConfig``, and deploy an
         ``Endpoint`` from this ``Model``. If ``self.predictor_cls`` is not None,
@@ -434,6 +688,16 @@ class Model(object):
                 in the ``Endpoint`` created from this ``Model``.
             instance_type (str): The EC2 instance type to deploy this Model to.
                 For example, 'ml.p2.xlarge', or 'local' for local mode.
+            serializer (:class:`~sagemaker.serializers.BaseSerializer`): A
+                serializer object, used to encode data for an inference endpoint
+                (default: None). If ``serializer`` is not None, then
+                ``serializer`` will override the default serializer. The
+                default serializer is set by the ``predictor_cls``.
+            deserializer (:class:`~sagemaker.deserializers.BaseDeserializer`): A
+                deserializer object, used to decode data from an inference
+                endpoint (default: None). If ``deserializer`` is not None, then
+                ``deserializer`` will override the default deserializer. The
+                default deserializer is set by the ``predictor_cls``.
             accelerator_type (str): Type of Elastic Inference accelerator to
                 deploy this model for model loading and inference, for example,
                 'ml.eia1.medium'. If not specified, no Elastic Inference
@@ -442,11 +706,6 @@ class Model(object):
                 https://docs.aws.amazon.com/sagemaker/latest/dg/ei.html
             endpoint_name (str): The name of the endpoint to create (default:
                 None). If not specified, a unique endpoint name will be created.
-            update_endpoint (bool): Flag to update the model in an existing
-                Amazon SageMaker endpoint. If True, this will deploy a new
-                EndpointConfig to an already existing endpoint and delete
-                resources corresponding to the previous EndpointConfig. If
-                False, a new endpoint will be created. Default: False
             tags (List[dict[str, str]]): The list of tags to attach to this
                 specific endpoint.
             kms_key (str): The ARN of the KMS key that is used to encrypt the
@@ -463,6 +722,7 @@ class Model(object):
                 ``self.predictor_cls`` on the created endpoint name, if ``self.predictor_cls``
                 is not None. Otherwise, return None.
         """
+        removed_kwargs("update_endpoint", kwargs)
         self._init_sagemaker_session_if_does_not_exist(instance_type)
 
         if self.role is None:
@@ -475,8 +735,9 @@ class Model(object):
 
         compiled_model_suffix = "-".join(instance_type.split(".")[:-1])
         if self._is_compiled_model:
-            name_prefix = self.name or utils.name_from_image(self.image)
-            self.name = "{}{}".format(name_prefix, compiled_model_suffix)
+            self._ensure_base_name_if_needed(self.image_uri)
+            if self._base_name is not None:
+                self._base_name = "-".join((self._base_name, compiled_model_suffix))
 
         self._create_sagemaker_model(instance_type, accelerator_type, tags)
         production_variant = sagemaker.production_variant(
@@ -485,40 +746,31 @@ class Model(object):
         if endpoint_name:
             self.endpoint_name = endpoint_name
         else:
-            self.endpoint_name = self.name
-            if self._is_compiled_model and not self.endpoint_name.endswith(compiled_model_suffix):
-                self.endpoint_name += compiled_model_suffix
+            base_endpoint_name = self._base_name or utils.base_from_name(self.name)
+            if self._is_compiled_model and not base_endpoint_name.endswith(compiled_model_suffix):
+                base_endpoint_name = "-".join((base_endpoint_name, compiled_model_suffix))
+            self.endpoint_name = utils.name_from_base(base_endpoint_name)
 
         data_capture_config_dict = None
         if data_capture_config is not None:
             data_capture_config_dict = data_capture_config._to_request_dict()
 
-        if update_endpoint:
-            endpoint_config_name = self.sagemaker_session.create_endpoint_config(
-                name=self.name,
-                model_name=self.name,
-                initial_instance_count=initial_instance_count,
-                instance_type=instance_type,
-                accelerator_type=accelerator_type,
-                tags=tags,
-                kms_key=kms_key,
-                data_capture_config_dict=data_capture_config_dict,
-            )
-            self.sagemaker_session.update_endpoint(
-                self.endpoint_name, endpoint_config_name, wait=wait
-            )
-        else:
-            self.sagemaker_session.endpoint_from_production_variants(
-                name=self.endpoint_name,
-                production_variants=[production_variant],
-                tags=tags,
-                kms_key=kms_key,
-                wait=wait,
-                data_capture_config_dict=data_capture_config_dict,
-            )
+        self.sagemaker_session.endpoint_from_production_variants(
+            name=self.endpoint_name,
+            production_variants=[production_variant],
+            tags=tags,
+            kms_key=kms_key,
+            wait=wait,
+            data_capture_config_dict=data_capture_config_dict,
+        )
 
         if self.predictor_cls:
-            return self.predictor_cls(self.endpoint_name, self.sagemaker_session)
+            predictor = self.predictor_cls(self.endpoint_name, self.sagemaker_session)
+            if serializer:
+                predictor.serializer = serializer
+            if deserializer:
+                predictor.deserializer = deserializer
+            return predictor
         return None
 
     def transformer(
@@ -585,7 +837,7 @@ class Model(object):
             max_payload=max_payload,
             env=env,
             tags=tags,
-            base_transform_job_name=self.name,
+            base_transform_job_name=self._base_name or self.name,
             volume_kms_key=volume_kms_key,
             sagemaker_session=self.sagemaker_session,
         )
@@ -605,7 +857,6 @@ class Model(object):
 
 SCRIPT_PARAM_NAME = "sagemaker_program"
 DIR_PARAM_NAME = "sagemaker_submit_directory"
-CLOUDWATCH_METRICS_PARAM_NAME = "sagemaker_enable_cloudwatch_metrics"
 CONTAINER_LOG_LEVEL_PARAM_NAME = "sagemaker_container_log_level"
 JOB_NAME_PARAM_NAME = "sagemaker_job_name"
 MODEL_SERVER_WORKERS_PARAM_NAME = "sagemaker_model_server_workers"
@@ -623,27 +874,26 @@ class FrameworkModel(Model):
     def __init__(
         self,
         model_data,
-        image,
+        image_uri,
         role,
         entry_point,
         source_dir=None,
         predictor_cls=None,
         env=None,
         name=None,
-        enable_cloudwatch_metrics=False,
         container_log_level=logging.INFO,
         code_location=None,
         sagemaker_session=None,
         dependencies=None,
         git_config=None,
-        **kwargs
+        **kwargs,
     ):
         """Initialize a ``FrameworkModel``.
 
         Args:
             model_data (str): The S3 location of a SageMaker model data
                 ``.tar.gz`` file.
-            image (str): A Docker image URI.
+            image_uri (str): A Docker image URI.
             role (str): An IAM role name or ARN for SageMaker to access AWS
                 resources on your behalf.
             entry_point (str): Path (absolute or relative) to the Python source
@@ -652,8 +902,8 @@ class FrameworkModel(Model):
                 must point to a file located at the root of ``source_dir``.
                 If 'git_config' is provided, 'entry_point' should be
                 a relative location to the Python source file in the Git repo.
-                Example:
 
+                Example:
                     With the following GitHub repo directory structure:
 
                     >>> |----- README.md
@@ -670,6 +920,7 @@ class FrameworkModel(Model):
                 'source_dir' should be a relative location to a directory in the Git repo.
                 If the directory points to S3, no code will be uploaded and the S3 location
                 will be used instead.
+
                 .. admonition:: Example
 
                     With the following GitHub repo directory structure:
@@ -684,13 +935,10 @@ class FrameworkModel(Model):
                 function to call to create a predictor (default: None). If not
                 None, ``deploy`` will return the result of invoking this
                 function on the created endpoint name.
-            env (dict[str, str]): Environment variables to run with ``image``
+            env (dict[str, str]): Environment variables to run with ``image_uri``
                 when hosted in SageMaker (default: None).
             name (str): The model name. If None, a default model name will be
                 selected on each ``deploy``.
-            enable_cloudwatch_metrics (bool): Whether training and hosting
-                containers will generate CloudWatch metrics under the
-                AWS/SageMakerContainer namespace (default: False).
             container_log_level (int): Log level to use within the container
                 (default: logging.INFO). Valid values are defined in the Python
                 logging module.
@@ -709,11 +957,16 @@ class FrameworkModel(Model):
                 list of relative locations to directories with any additional
                 libraries needed in the Git repo. If the ```source_dir``` points
                 to S3, code will be uploaded and the S3 location will be used
-                instead. .. admonition:: Example
+                instead.
 
-                    The following call >>> Estimator(entry_point='inference.py',
-                    dependencies=['my/libs/common', 'virtual-env']) results in
-                    the following inside the container:
+                .. admonition:: Example
+
+                    The following call
+
+                    >>> Model(entry_point='inference.py',
+                    ...       dependencies=['my/libs/common', 'virtual-env'])
+
+                    results in the following inside the container:
 
                     >>> $ ls
 
@@ -721,6 +974,8 @@ class FrameworkModel(Model):
                     >>>     |------ inference.py
                     >>>     |------ common
                     >>>     |------ virtual-env
+
+                This is not supported with "local code" in Local Mode.
             git_config (dict[str, str]): Git configurations used for cloning
                 files, including ``repo``, ``branch``, ``commit``,
                 ``2FA_enabled``, ``username``, ``password`` and ``token``. The
@@ -770,7 +1025,8 @@ class FrameworkModel(Model):
                 authentication if they are provided; otherwise, python SDK will
                 try to use either CodeCommit credential helper or local
                 credential storage for authentication.
-            **kwargs: Keyword arguments passed to the ``Model`` initializer.
+            **kwargs: Keyword arguments passed to the superclass
+                :class:`~sagemaker.model.Model`.
 
         .. tip::
 
@@ -778,23 +1034,22 @@ class FrameworkModel(Model):
             :class:`~sagemaker.model.Model`.
         """
         super(FrameworkModel, self).__init__(
+            image_uri,
             model_data,
-            image,
             role,
             predictor_cls=predictor_cls,
             env=env,
             name=name,
             sagemaker_session=sagemaker_session,
-            **kwargs
+            **kwargs,
         )
         self.entry_point = entry_point
         self.source_dir = source_dir
         self.dependencies = dependencies or []
         self.git_config = git_config
-        self.enable_cloudwatch_metrics = enable_cloudwatch_metrics
         self.container_log_level = container_log_level
         if code_location:
-            self.bucket, self.key_prefix = fw_utils.parse_s3_url(code_location)
+            self.bucket, self.key_prefix = s3.parse_s3_url(code_location)
         else:
             self.bucket, self.key_prefix = None, None
         if self.git_config:
@@ -807,12 +1062,10 @@ class FrameworkModel(Model):
         self.uploaded_code = None
         self.repacked_model_data = None
 
-    def prepare_container_def(
-        self, instance_type, accelerator_type=None
-    ):  # pylint disable=unused-argument
-        """Return a container definition with framework configuration set in
-        model environment variables.
+    def prepare_container_def(self, instance_type=None, accelerator_type=None):
+        """Return a container definition with framework configuration.
 
+        Framework configuration is set in model environment variables.
         This also uploads user-supplied code to S3.
 
         Args:
@@ -826,18 +1079,16 @@ class FrameworkModel(Model):
             dict[str, str]: A container definition object usable with the
             CreateModel API.
         """
-        deploy_key_prefix = fw_utils.model_code_key_prefix(self.key_prefix, self.name, self.image)
+        deploy_key_prefix = fw_utils.model_code_key_prefix(
+            self.key_prefix, self.name, self.image_uri
+        )
         self._upload_code(deploy_key_prefix)
         deploy_env = dict(self.env)
         deploy_env.update(self._framework_env_vars())
-        return sagemaker.container_def(self.image, self.model_data, deploy_env)
+        return sagemaker.container_def(self.image_uri, self.model_data, deploy_env)
 
     def _upload_code(self, key_prefix, repack=False):
-        """
-        Args:
-            key_prefix:
-            repack:
-        """
+        """Placeholder Docstring"""
         local_code = utils.get_config_value("local.local_code", self.sagemaker_session.config)
         if self.sagemaker_session.local_mode and local_code:
             self.uploaded_code = None
@@ -867,7 +1118,7 @@ class FrameworkModel(Model):
             )
 
             self.repacked_model_data = repacked_model_data
-            self.uploaded_code = UploadedCode(
+            self.uploaded_code = fw_utils.UploadedCode(
                 s3_prefix=self.repacked_model_data, script_name=os.path.basename(self.entry_point)
             )
 
@@ -889,7 +1140,6 @@ class FrameworkModel(Model):
         return {
             SCRIPT_PARAM_NAME.upper(): script_name,
             DIR_PARAM_NAME.upper(): dir_name,
-            CLOUDWATCH_METRICS_PARAM_NAME.upper(): str(self.enable_cloudwatch_metrics).lower(),
             CONTAINER_LOG_LEVEL_PARAM_NAME.upper(): str(self.container_log_level),
             SAGEMAKER_REGION_PARAM_NAME.upper(): self.sagemaker_session.boto_region_name,
         }
@@ -917,7 +1167,9 @@ class ModelPackage(Model):
                 ``model_data`` is not required.
             **kwargs: Additional kwargs passed to the Model constructor.
         """
-        super(ModelPackage, self).__init__(role=role, model_data=model_data, image=None, **kwargs)
+        super(ModelPackage, self).__init__(
+            role=role, model_data=model_data, image_uri=None, **kwargs
+        )
 
         if model_package_arn and algorithm_arn:
             raise ValueError(
@@ -953,8 +1205,7 @@ class ModelPackage(Model):
         return name
 
     def enable_network_isolation(self):
-        """Whether to enable network isolation when creating a model out of this
-        ModelPackage
+        """Whether to enable network isolation when creating a model out of this ModelPackage
 
         Returns:
             bool: If network isolation should be enabled or not.
@@ -1006,13 +1257,18 @@ class ModelPackage(Model):
         if self.env != {}:
             container_def["Environment"] = self.env
 
-        model_package_short_name = model_package_name.split("/")[-1]
-        enable_network_isolation = self.enable_network_isolation()
-        self.name = self.name or utils.name_from_base(model_package_short_name)
+        self._ensure_base_name_if_needed(model_package_name.split("/")[-1])
+        self._set_model_name_if_needed()
+
         self.sagemaker_session.create_model(
             self.name,
             self.role,
             container_def,
             vpc_config=self.vpc_config,
-            enable_network_isolation=enable_network_isolation,
+            enable_network_isolation=self.enable_network_isolation(),
         )
+
+    def _ensure_base_name_if_needed(self, base_name):
+        """Set the base name if there is no model name provided."""
+        if self.name is None:
+            self._base_name = base_name

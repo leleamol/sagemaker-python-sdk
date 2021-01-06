@@ -20,16 +20,15 @@ import os
 import random
 import re
 import shutil
-import sys
 import tarfile
 import tempfile
 import time
 from datetime import datetime
-from functools import wraps
 
 import botocore
-import six
 from six.moves.urllib import parse
+
+from sagemaker import deprecations
 
 
 ECR_URI_PATTERN = r"^(\d+)(\.)dkr(\.)ecr(\.)(.+)(\.)(.*)(/)(.*:.*)$"
@@ -43,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 # Use the base name of the image as the job name if the user doesn't give us one
-def name_from_image(image):
+def name_from_image(image, max_length=63):
     """Create a training job name based on the image name and a timestamp.
 
     Args:
@@ -51,9 +50,10 @@ def name_from_image(image):
 
     Returns:
         str: Training job name using the algorithm from the image name and a
-        timestamp.
+            timestamp.
+        max_length (int): Maximum length for the resulting string (default: 63).
     """
-    return name_from_base(base_name_from_image(image))
+    return name_from_base(base_name_from_image(image), max_length=max_length)
 
 
 def name_from_base(base, max_length=63, short=False):
@@ -65,8 +65,8 @@ def name_from_base(base, max_length=63, short=False):
 
     Args:
         base (str): String used as prefix to generate the unique name.
-        max_length (int): Maximum length for the resulting string.
-        short (bool): Whether or not to use a truncated timestamp.
+        max_length (int): Maximum length for the resulting string (default: 63).
+        short (bool): Whether or not to use a truncated timestamp (default: False).
 
     Returns:
         str: Input parameter with appended timestamp.
@@ -77,11 +77,7 @@ def name_from_base(base, max_length=63, short=False):
 
 
 def unique_name_from_base(base, max_length=63):
-    """
-    Args:
-        base:
-        max_length:
-    """
+    """Placeholder Docstring"""
     unique = "%04x" % random.randrange(16 ** 4)  # 4-digit hex
     ts = str(int(time.time()))
     available_length = max_length - 2 - len(ts) - len(unique)
@@ -90,8 +86,7 @@ def unique_name_from_base(base, max_length=63):
 
 
 def base_name_from_image(image):
-    """Extract the base name of the image to use as the 'algorithm name' for the
-    job.
+    """Extract the base name of the image to use as the 'algorithm name' for the job.
 
     Args:
         image (str): Image name.
@@ -102,6 +97,22 @@ def base_name_from_image(image):
     m = re.match("^(.+/)?([^:/]+)(:[^:]+)?$", image)
     algo_name = m.group(2) if m else image
     return algo_name
+
+
+def base_from_name(name):
+    """Extract the base name of the resource name (for use with future resource name generation).
+
+    This function looks for timestamps that match the ones produced by
+    :func:`~sagemaker.utils.name_from_base`.
+
+    Args:
+        name (str): The resource name.
+
+    Returns:
+        str: The base name, as extracted from the resource name.
+    """
+    m = re.match(r"^(.+)-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d{3}|\d{6}-\d{4})", name)
+    return m.group(1) if m else name
 
 
 def sagemaker_timestamp():
@@ -116,27 +127,23 @@ def sagemaker_short_timestamp():
     return time.strftime("%y%m%d-%H%M")
 
 
-def debug(func):
-    """Print the function name and arguments for debugging.
+def build_dict(key, value):
+    """Return a dict of key and value pair if value is not None, otherwise return an empty dict.
 
     Args:
-        func:
+        key (str): input key
+        value (str): input value
+
+    Returns:
+        dict: dict of key and value or an empty dict.
     """
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        print("{} args: {} kwargs: {}".format(func.__name__, args, kwargs))
-        return func(*args, **kwargs)
-
-    return wrapper
+    if value:
+        return {key: value}
+    return {}
 
 
 def get_config_value(key_path, config):
-    """
-    Args:
-        key_path:
-        config:
-    """
+    """Placeholder Docstring"""
     if config is None:
         return None
 
@@ -160,38 +167,6 @@ def get_short_version(framework_version):
         str: The short version string
     """
     return ".".join(framework_version.split(".")[:2])
-
-
-def to_str(value):
-    """Convert the input to a string, unless it is a unicode string in Python 2.
-
-    Unicode strings are supported as native strings in Python 3, but
-    ``str()`` cannot be invoked on unicode strings in Python 2, so we need to
-    check for that case when converting user-specified values to strings.
-
-    Args:
-        value: The value to convert to a string.
-
-    Returns:
-        str or unicode: The string representation of the value or the unicode
-        string itself.
-    """
-    if sys.version_info.major < 3 and isinstance(value, six.string_types):
-        return value
-    return str(value)
-
-
-def extract_name_from_job_arn(arn):
-    """Returns the name used in the API given a full ARN for a training job or
-    hyperparameter tuning job.
-
-    Args:
-        arn:
-    """
-    slash_pos = arn.find("/")
-    if slash_pos == -1:
-        raise ValueError("Cannot parse invalid ARN: %s" % arn)
-    return arn[(slash_pos + 1) :]
 
 
 def secondary_training_status_changed(current_job_description, prev_job_description):
@@ -231,8 +206,7 @@ def secondary_training_status_changed(current_job_description, prev_job_descript
 
 
 def secondary_training_status_message(job_description, prev_description):
-    """Returns a string contains last modified time and the secondary training
-    job status message.
+    """Returns a string contains last modified time and the secondary training job status message.
 
     Args:
         job_description: Returned response from DescribeTrainingJob call
@@ -277,55 +251,6 @@ def secondary_training_status_message(job_description, prev_description):
         status_strs.append("{} {} - {}".format(time_str, transition["Status"], message))
 
     return "\n".join(status_strs)
-
-
-def generate_tensorboard_url(domain, bucket_paths):
-    """Generate Tensorboard URL for given list of s3 buckets
-
-    Args:
-        domain: JupyterLab app domain
-        bucket_paths: List of S3 bucket paths in format `bucket/path`
-                      or a single string in the same format
-
-    Returns:
-        str: Tensorboard URL
-
-    Raises:
-        AttributeError if invalid inputs are passed
-    """
-
-    def trim_prefix(s, prefix):
-        if s.startswith(prefix):
-            return s[len(prefix) :]
-        return s
-
-    def encode_s3_url(s3_url):
-        if not s3_url:
-            raise AttributeError("bucket_paths element should not be empty")
-        s3_url = trim_prefix(s3_url, S3_PREFIX)
-        return parse.quote_plus("{}{}".format(S3_PREFIX, s3_url))
-
-    if not isinstance(domain, six.string_types):
-        raise AttributeError("domain parameter should be string")
-
-    if len(domain) == 0:
-        raise AttributeError("domain parameter should not be empty")
-
-    if isinstance(bucket_paths, six.string_types):
-        bucket_paths = [bucket_paths]
-    elif not isinstance(bucket_paths, list):
-        raise AttributeError("bucket paths should be a list or a string")
-
-    if len(bucket_paths) == 0:
-        raise AttributeError("bucket_paths parameter should not be empty list")
-
-    domain = trim_prefix(domain, HTTPS_PREFIX)
-    domain = trim_prefix(domain, HTTP_PREFIX)
-
-    s3_urls = map(encode_s3_url, bucket_paths)
-    query = ",".join(s3_urls)
-
-    return "https://{}/tensorboard/default?s3urls={}".format(domain, query)
 
 
 def download_folder(bucket_name, prefix, target, sagemaker_session):
@@ -415,9 +340,9 @@ def create_tar_file(source_files, target=None):
 
 @contextlib.contextmanager
 def _tmpdir(suffix="", prefix="tmp"):
-    """Create a temporary directory with a context manager. The file is deleted
-    when the context exits.
+    """Create a temporary directory with a context manager.
 
+    The file is deleted when the context exits.
     The prefix, suffix, and dir arguments are the same as for mkstemp().
 
     Args:
@@ -443,8 +368,7 @@ def repack_model(
     sagemaker_session,
     kms_key=None,
 ):
-    """Unpack model tarball and creates a new model tarball with the provided
-    code script.
+    """Unpack model tarball and creates a new model tarball with the provided code script.
 
     This function does the following: - uncompresses model tarball from S3 or
     local system into a temp folder - replaces the inference code from the model
@@ -499,12 +423,7 @@ def repack_model(
 
 
 def _save_model(repacked_model_uri, tmp_model_path, sagemaker_session, kms_key):
-    """
-    Args:
-        repacked_model_uri:
-        tmp_model_path:
-        sagemaker_session:
-    """
+    """Placeholder docstring"""
     if repacked_model_uri.lower().startswith("s3://"):
         url = parse.urlparse(repacked_model_uri)
         bucket, key = url.netloc, url.path.lstrip("/")
@@ -524,15 +443,7 @@ def _save_model(repacked_model_uri, tmp_model_path, sagemaker_session, kms_key):
 def _create_or_update_code_dir(
     model_dir, inference_script, source_directory, dependencies, sagemaker_session, tmp
 ):
-    """
-    Args:
-        model_dir:
-        inference_script:
-        source_directory:
-        dependencies:
-        sagemaker_session:
-        tmp:
-    """
+    """Placeholder docstring"""
     code_dir = os.path.join(model_dir, "code")
     if source_directory and source_directory.lower().startswith("s3://"):
         local_code_path = os.path.join(tmp, "local_code.tar.gz")
@@ -567,12 +478,7 @@ def _create_or_update_code_dir(
 
 
 def _extract_model(model_uri, sagemaker_session, tmp):
-    """
-    Args:
-        model_uri:
-        sagemaker_session:
-        tmp:
-    """
+    """Placeholder docstring"""
     tmp_model_dir = os.path.join(tmp, "model")
     os.mkdir(tmp_model_dir)
     if model_uri.lower().startswith("s3://"):
@@ -586,12 +492,7 @@ def _extract_model(model_uri, sagemaker_session, tmp):
 
 
 def download_file_from_url(url, dst, sagemaker_session):
-    """
-    Args:
-        url:
-        dst:
-        sagemaker_session:
-    """
+    """Placeholder docstring"""
     url = parse.urlparse(url)
     bucket, key = url.netloc, url.path.lstrip("/")
 
@@ -614,20 +515,6 @@ def download_file(bucket_name, path, target, sagemaker_session):
     s3 = boto_session.resource("s3", region_name=sagemaker_session.boto_region_name)
     bucket = s3.Bucket(bucket_name)
     bucket.download_file(path, target)
-
-
-def get_ecr_image_uri_prefix(account, region):
-    """get prefix of ECR image URI
-
-    Args:
-        account (str): AWS account number
-        region (str): AWS region name
-
-    Returns:
-        (str): URI prefix of ECR image
-    """
-    endpoint_data = _botocore_resolver().construct_endpoint("ecr", region)
-    return "{}.dkr.{}".format(account, endpoint_data["hostname"])
 
 
 def sts_regional_endpoint(region):
@@ -683,8 +570,7 @@ def _botocore_resolver():
 
 
 def _aws_partition(region):
-    """
-    Given a region name (ex: "cn-north-1"), return the corresponding aws partition ("aws-cn").
+    """Given a region name (ex: "cn-north-1"), return the corresponding aws partition ("aws-cn").
 
     Args:
         region (str): The region name for which to return the corresponding partition.
@@ -698,31 +584,28 @@ def _aws_partition(region):
 
 
 class DeferredError(object):
-    """Stores an exception and raises it at a later time if this object is
-    accessed in any way. Useful to allow soft-dependencies on imports, so that
-    the ImportError can be raised again later if code actually relies on the
-    missing library.
+    """Stores an exception and raises it at a later time if this object is accessed in any way.
+
+    Useful to allow soft-dependencies on imports, so that the ImportError can be raised again
+    later if code actually relies on the missing library.
 
     Example::
 
         try:
             import obscurelib
         except ImportError as e:
-            logging.warning("Failed to import obscurelib. Obscure features will not work.")
+            logger.warning("Failed to import obscurelib. Obscure features will not work.")
             obscurelib = DeferredError(e)
     """
 
     def __init__(self, exception):
-        """
-        Args:
-            exception:
-        """
+        """Placeholder docstring"""
         self.exc = exception
 
     def __getattr__(self, name):
-        """Called by Python interpreter before using any method or property on
-        the object. So this will short-circuit essentially any access to this
-        object.
+        """Called by Python interpreter before using any method or property on the object.
+
+        So this will short-circuit essentially any access to this object.
 
         Args:
             name:
@@ -731,8 +614,7 @@ class DeferredError(object):
 
 
 def _module_import_error(py_module, feature, extras):
-    """Return error message for module import errors, provide
-    installation details.
+    """Return error message for module import errors, provide installation details.
 
     Args:
         py_module (str): Module that failed to be imported
@@ -748,3 +630,6 @@ def _module_import_error(py_module, feature, extras):
         "to install all required dependencies."
     )
     return error_msg.format(py_module, feature, extras)
+
+
+get_ecr_image_uri_prefix = deprecations.removed_function("get_ecr_image_uri_prefix")

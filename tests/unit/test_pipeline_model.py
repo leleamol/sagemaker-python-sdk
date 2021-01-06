@@ -17,8 +17,7 @@ from mock import Mock, patch
 
 from sagemaker.model import FrameworkModel
 from sagemaker.pipeline import PipelineModel
-from sagemaker.predictor import RealTimePredictor
-from sagemaker.session import ModelContainer
+from sagemaker.predictor import Predictor
 from sagemaker.sparkml import SparkMLModel
 
 ENTRY_POINT = "blah.py"
@@ -30,8 +29,6 @@ INSTANCE_TYPE = "ml.m4.xlarge"
 ROLE = "some-role"
 ENV_1 = {"SAGEMAKER_DEFAULT_INVOCATIONS_ACCEPT": "application/json"}
 ENV_2 = {"SAGEMAKER_DEFAULT_INVOCATIONS_ACCEPT": "text/csv"}
-MODEL_CONTAINER_1 = ModelContainer(image=MODEL_IMAGE_1, model_data=MODEL_DATA_1, env=ENV_1)
-MODEL_CONTAINER_2 = ModelContainer(image=MODEL_IMAGE_2, model_data=MODEL_DATA_2, env=ENV_2)
 ENDPOINT = "some-ep"
 
 
@@ -54,7 +51,7 @@ class DummyFrameworkModel(FrameworkModel):
         )
 
     def create_predictor(self, endpoint_name):
-        return RealTimePredictor(endpoint_name, self.sagemaker_session)
+        return Predictor(endpoint_name, self.sagemaker_session)
 
 
 @pytest.fixture()
@@ -93,7 +90,6 @@ def test_prepare_container_def(tfo, time, sagemaker_session):
                 "SAGEMAKER_SUBMIT_DIRECTORY": "s3://mybucket/mi-1-2017-10-10-14-14-15/sourcedir.tar.gz",
                 "SAGEMAKER_CONTAINER_LOG_LEVEL": "20",
                 "SAGEMAKER_REGION": "us-west-2",
-                "SAGEMAKER_ENABLE_CLOUDWATCH_METRICS": "false",
             },
             "Image": "mi-1",
             "ModelDataUrl": "s3://bucket/model_1.tar.gz",
@@ -101,7 +97,7 @@ def test_prepare_container_def(tfo, time, sagemaker_session):
         {
             "Environment": {"SAGEMAKER_DEFAULT_INVOCATIONS_ACCEPT": "text/csv"},
             "Image": "246618743249.dkr.ecr.us-west-2.amazonaws.com"
-            + "/sagemaker-sparkml-serving:2.2",
+            + "/sagemaker-sparkml-serving:2.4",
             "ModelDataUrl": "s3://bucket/model_2.tar.gz",
         },
     ]
@@ -117,7 +113,8 @@ def test_deploy(tfo, time, sagemaker_session):
     model = PipelineModel(
         models=[framework_model, sparkml_model], role=ROLE, sagemaker_session=sagemaker_session
     )
-    model.deploy(instance_type=INSTANCE_TYPE, initial_instance_count=1)
+    kms_key = "pipeline-model-deploy-kms-key"
+    model.deploy(instance_type=INSTANCE_TYPE, initial_instance_count=1, kms_key=kms_key)
     sagemaker_session.endpoint_from_production_variants.assert_called_with(
         name="mi-1-2017-10-10-14-14-15",
         production_variants=[
@@ -130,6 +127,7 @@ def test_deploy(tfo, time, sagemaker_session):
             }
         ],
         tags=None,
+        kms_key=kms_key,
         wait=True,
         data_capture_config_dict=None,
     )
@@ -158,6 +156,7 @@ def test_deploy_endpoint_name(tfo, time, sagemaker_session):
             }
         ],
         tags=None,
+        kms_key=None,
         wait=True,
         data_capture_config_dict=None,
     )
@@ -187,6 +186,7 @@ def test_deploy_update_endpoint(tfo, time, sagemaker_session):
         initial_instance_count=INSTANCE_COUNT,
         instance_type=INSTANCE_TYPE,
         tags=None,
+        kms_key=None,
         data_capture_config_dict=None,
     )
     config_name = sagemaker_session.create_endpoint_config(
@@ -279,6 +279,7 @@ def test_deploy_tags(tfo, time, sagemaker_session):
         ],
         tags=tags,
         wait=True,
+        kms_key=None,
         data_capture_config_dict=None,
     )
 
@@ -302,3 +303,43 @@ def test_delete_model(tfo, time, sagemaker_session):
 
     pipeline_model.delete_model()
     sagemaker_session.delete_model.assert_called_with(pipeline_model.name)
+
+
+@patch("tarfile.open")
+@patch("time.strftime", return_value=TIMESTAMP)
+def test_network_isolation(tfo, time, sagemaker_session):
+    framework_model = DummyFrameworkModel(sagemaker_session)
+    sparkml_model = SparkMLModel(
+        model_data=MODEL_DATA_2, role=ROLE, sagemaker_session=sagemaker_session
+    )
+    model = PipelineModel(
+        models=[framework_model, sparkml_model],
+        role=ROLE,
+        sagemaker_session=sagemaker_session,
+        enable_network_isolation=True,
+    )
+    model.deploy(instance_type=INSTANCE_TYPE, initial_instance_count=1)
+
+    sagemaker_session.create_model.assert_called_with(
+        model.name,
+        ROLE,
+        [
+            {
+                "Image": "mi-1",
+                "Environment": {
+                    "SAGEMAKER_PROGRAM": "blah.py",
+                    "SAGEMAKER_SUBMIT_DIRECTORY": "s3://mybucket/mi-1-2017-10-10-14-14-15/sourcedir.tar.gz",
+                    "SAGEMAKER_CONTAINER_LOG_LEVEL": "20",
+                    "SAGEMAKER_REGION": "us-west-2",
+                },
+                "ModelDataUrl": "s3://bucket/model_1.tar.gz",
+            },
+            {
+                "Image": "246618743249.dkr.ecr.us-west-2.amazonaws.com/sagemaker-sparkml-serving:2.4",
+                "Environment": {},
+                "ModelDataUrl": "s3://bucket/model_2.tar.gz",
+            },
+        ],
+        vpc_config=None,
+        enable_network_isolation=True,
+    )

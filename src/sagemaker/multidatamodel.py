@@ -14,10 +14,12 @@
 from __future__ import absolute_import
 
 import os
+
 from six.moves.urllib.parse import urlparse
 
 import sagemaker
 from sagemaker import local, s3
+from sagemaker.deprecations import removed_kwargs
 from sagemaker.model import Model
 from sagemaker.session import Session
 
@@ -25,9 +27,9 @@ MULTI_MODEL_CONTAINER_MODE = "MultiModel"
 
 
 class MultiDataModel(Model):
-    """A SageMaker ``MultiDataModel`` that can be used to deploy multiple models to the same
-    SageMaker ``Endpoint``, and also deploy additional models to an existing SageMaker
-    multi-model ``Endpoint``
+    """SageMaker ``MultiDataModel`` can be used to deploy multiple models to the same ``Endpoint``.
+
+    And also deploy additional models to an existing SageMaker multi-model ``Endpoint``
     """
 
     def __init__(
@@ -35,13 +37,14 @@ class MultiDataModel(Model):
         name,
         model_data_prefix,
         model=None,
-        image=None,
+        image_uri=None,
         role=None,
         sagemaker_session=None,
-        **kwargs
+        **kwargs,
     ):
-        """Initialize a ``MultiDataModel``. In addition to these arguments, it supports all
-           arguments supported by ``Model`` constructor
+        """Initialize a ``MultiDataModel``.
+
+        Addition to these arguments, it supports all arguments supported by ``Model`` constructor.
 
         Args:
             name (str): The model name.
@@ -50,9 +53,9 @@ class MultiDataModel(Model):
             model (sagemaker.Model): The Model object that would define the
                 SageMaker model attributes like vpc_config, predictors, etc.
                 If this is present, the attributes from this model are used when
-                deploying the ``MultiDataModel``.  Parameters 'image', 'role' and 'kwargs'
+                deploying the ``MultiDataModel``.  Parameters 'image_uri', 'role' and 'kwargs'
                 are not permitted when model parameter is set.
-            image (str): A Docker image URI. It can be null if the 'model' parameter
+            image_uri (str): A Docker image URI. It can be null if the 'model' parameter
                 is passed to during ``MultiDataModel`` initialization (default: None)
             role (str): An AWS IAM role (either name or full ARN). The Amazon
                 SageMaker training jobs and APIs that create Amazon SageMaker
@@ -82,9 +85,10 @@ class MultiDataModel(Model):
                 )
             )
 
-        if model and (image or role or kwargs):
+        if model and (image_uri or role or kwargs):
             raise ValueError(
-                "Parameters image, role or kwargs are not permitted when model parameter is passed."
+                "Parameters image_uri, role, and kwargs are not permitted when "
+                "model parameter is passed."
             )
 
         self.name = name
@@ -103,17 +107,19 @@ class MultiDataModel(Model):
         # Set the ``Model`` parameters if the model parameter is not specified
         if not self.model:
             super(MultiDataModel, self).__init__(
+                image_uri,
                 self.model_data_prefix,
-                image,
                 role,
                 name=self.name,
                 sagemaker_session=self.sagemaker_session,
-                **kwargs
+                **kwargs,
             )
 
-    def prepare_container_def(self, instance_type, accelerator_type=None):
-        """Return a container definition set with MultiModel mode,
-        model data and other parameters from the model (if available).
+    def prepare_container_def(self, instance_type=None, accelerator_type=None):
+        """Return a container definition set.
+
+        Definition set includes MultiModel mode, model data and other parameters
+        from the model (if available).
 
         Subclasses can override this to provide custom container definitions
         for deployment to a specific instance type. Called by ``deploy()``.
@@ -121,18 +127,18 @@ class MultiDataModel(Model):
         Returns:
             dict[str, str]: A complete container definition object usable with the CreateModel API
         """
-        # Copy the trained model's image and environment variables if they exist. Models trained
+        # Copy the trained model's image URI and environment variables if they exist. Models trained
         # with FrameworkEstimator set framework specific environment variables which need to be
         # copied over
         if self.model:
             container_definition = self.model.prepare_container_def(instance_type, accelerator_type)
-            image = container_definition["Image"]
+            image_uri = container_definition["Image"]
             environment = container_definition["Environment"]
         else:
-            image = self.image
+            image_uri = self.image_uri
             environment = self.env
         return sagemaker.container_def(
-            image,
+            image_uri,
             env=environment,
             model_data_url=self.model_data_prefix,
             container_mode=self.container_mode,
@@ -142,13 +148,15 @@ class MultiDataModel(Model):
         self,
         initial_instance_count,
         instance_type,
+        serializer=None,
+        deserializer=None,
         accelerator_type=None,
         endpoint_name=None,
-        update_endpoint=False,
         tags=None,
         kms_key=None,
         wait=True,
         data_capture_config=None,
+        **kwargs,
     ):
         """Deploy this ``Model`` to an ``Endpoint`` and optionally return a ``Predictor``.
 
@@ -171,6 +179,16 @@ class MultiDataModel(Model):
                 in the ``Endpoint`` created from this ``Model``.
             instance_type (str): The EC2 instance type to deploy this Model to.
                 For example, 'ml.p2.xlarge', or 'local' for local mode.
+            serializer (:class:`~sagemaker.serializers.BaseSerializer`): A
+                serializer object, used to encode data for an inference endpoint
+                (default: None). If ``serializer`` is not None, then
+                ``serializer`` will override the default serializer. The
+                default serializer is set by the ``predictor_cls``.
+            deserializer (:class:`~sagemaker.deserializers.BaseDeserializer`): A
+                deserializer object, used to decode data from an inference
+                endpoint (default: None). If ``deserializer`` is not None, then
+                ``deserializer`` will override the default deserializer. The
+                default deserializer is set by the ``predictor_cls``.
             accelerator_type (str): Type of Elastic Inference accelerator to
                 deploy this model for model loading and inference, for example,
                 'ml.eia1.medium'. If not specified, no Elastic Inference
@@ -179,11 +197,6 @@ class MultiDataModel(Model):
                 https://docs.aws.amazon.com/sagemaker/latest/dg/ei.html
             endpoint_name (str): The name of the endpoint to create (default:
                 None). If not specified, a unique endpoint name will be created.
-            update_endpoint (bool): Flag to update the model in an existing
-                Amazon SageMaker endpoint. If True, this will deploy a new
-                EndpointConfig to an already existing endpoint and delete
-                resources corresponding to the previous EndpointConfig. If
-                False, a new endpoint will be created. Default: False
             tags (List[dict[str, str]]): The list of tags to attach to this
                 specific endpoint.
             kms_key (str): The ARN of the KMS key that is used to encrypt the
@@ -201,17 +214,18 @@ class MultiDataModel(Model):
                 if ``self.predictor_cls``
                 is not None. Otherwise, return None.
         """
+        removed_kwargs("update_endpoint", kwargs)
         # Set model specific parameters
         if self.model:
             enable_network_isolation = self.model.enable_network_isolation()
             role = self.model.role
             vpc_config = self.model.vpc_config
-            predictor = self.model.predictor_cls
+            predictor_cls = self.model.predictor_cls
         else:
             enable_network_isolation = self.enable_network_isolation()
             role = self.role
             vpc_config = self.vpc_config
-            predictor = self.predictor_cls
+            predictor_cls = self.predictor_cls
 
         if role is None:
             raise ValueError("Role can not be null for deploying a model")
@@ -241,37 +255,29 @@ class MultiDataModel(Model):
         if data_capture_config is not None:
             data_capture_config_dict = data_capture_config._to_request_dict()
 
-        if update_endpoint:
-            endpoint_config_name = self.sagemaker_session.create_endpoint_config(
-                name=self.name,
-                model_name=self.name,
-                initial_instance_count=initial_instance_count,
-                instance_type=instance_type,
-                accelerator_type=accelerator_type,
-                tags=tags,
-                kms_key=kms_key,
-                data_capture_config_dict=data_capture_config_dict,
-            )
-            self.sagemaker_session.update_endpoint(
-                self.endpoint_name, endpoint_config_name, wait=wait
-            )
-        else:
-            self.sagemaker_session.endpoint_from_production_variants(
-                name=self.endpoint_name,
-                production_variants=[production_variant],
-                tags=tags,
-                kms_key=kms_key,
-                wait=wait,
-                data_capture_config_dict=data_capture_config_dict,
-            )
+        self.sagemaker_session.endpoint_from_production_variants(
+            name=self.endpoint_name,
+            production_variants=[production_variant],
+            tags=tags,
+            kms_key=kms_key,
+            wait=wait,
+            data_capture_config_dict=data_capture_config_dict,
+        )
 
-        if predictor:
-            return predictor(self.endpoint_name, self.sagemaker_session)
+        if predictor_cls:
+            predictor = predictor_cls(self.endpoint_name, self.sagemaker_session)
+            if serializer:
+                predictor.serializer = serializer
+            if deserializer:
+                predictor.deserializer = deserializer
+            return predictor
         return None
 
     def add_model(self, model_data_source, model_data_path=None):
-        """Adds a model to the ``MultiDataModel`` by uploading or copying the model_data_source
-         artifact to the given S3 path model_data_path relative to model_data_prefix
+        """Adds a model to the ``MultiDataModel``.
+
+        It is done by uploading or copying the model_data_source artifact to the given
+        S3 path model_data_path relative to model_data_prefix
 
         Args:
             model_source: Valid local file path or S3 path of the trained model artifact
@@ -293,24 +299,24 @@ class MultiDataModel(Model):
                 model_data_path = source_model_data_path
 
             # Construct the destination path
-            dst_url = os.path.join(self.model_data_prefix, model_data_path)
+            dst_url = s3.s3_path_join(self.model_data_prefix, model_data_path)
             destination_bucket, destination_model_data_path = s3.parse_s3_url(dst_url)
 
             # Copy the model artifact
             self.s3_client.copy(copy_source, destination_bucket, destination_model_data_path)
-            return os.path.join("s3://", destination_bucket, destination_model_data_path)
+            return s3.s3_path_join("s3://", destination_bucket, destination_model_data_path)
 
         # If the model source is a local path, upload the local model artifact to the destination
-        #  s3 path
+        # S3 path
         if os.path.exists(model_data_source):
             destination_bucket, dst_prefix = s3.parse_s3_url(self.model_data_prefix)
             if model_data_path:
-                dst_s3_uri = os.path.join(dst_prefix, model_data_path)
+                dst_s3_uri = s3.s3_path_join(dst_prefix, model_data_path)
             else:
-                dst_s3_uri = os.path.join(dst_prefix, os.path.basename(model_data_source))
+                dst_s3_uri = s3.s3_path_join(dst_prefix, os.path.basename(model_data_source))
             self.s3_client.upload_file(model_data_source, destination_bucket, dst_s3_uri)
             # return upload_path
-            return os.path.join("s3://", destination_bucket, dst_s3_uri)
+            return s3.s3_path_join("s3://", destination_bucket, dst_s3_uri)
 
         # Raise error if the model source is of an unexpected type
         raise ValueError(
@@ -319,8 +325,9 @@ class MultiDataModel(Model):
         )
 
     def list_models(self):
-        """Generates and returns relative paths to model archives stored at model_data_prefix
-        S3 location.
+        """Generates and returns relative paths to model archives.
+
+        Archives are stored at model_data_prefix S3 location.
 
         Yields: Paths to model archives relative to model_data_prefix path.
         """

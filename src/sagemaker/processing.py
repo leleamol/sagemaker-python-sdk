@@ -10,22 +10,29 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
-"""This module contains code related to the ``Processor`` class, which is used
-for Amazon SageMaker Processing Jobs. These jobs let users perform data pre-processing,
-post-processing, feature engineering, data validation, and model evaluation,
+"""This module contains code related to the ``Processor`` class.
+
+which is used for Amazon SageMaker Processing Jobs. These jobs let users perform
+data pre-processing, post-processing, feature engineering, data validation, and model evaluation,
 and interpretation on Amazon SageMaker.
 """
 from __future__ import print_function, absolute_import
 
 import os
+import pathlib
 
 from six.moves.urllib.parse import urlparse
+from six.moves.urllib.request import url2pathname
 
+from sagemaker import s3
 from sagemaker.job import _Job
+from sagemaker.local import LocalSession
 from sagemaker.utils import base_name_from_image, name_from_base
 from sagemaker.session import Session
-from sagemaker.s3 import S3Uploader
 from sagemaker.network import NetworkConfig  # noqa: F401 # pylint: disable=unused-import
+from sagemaker.workflow.properties import Properties
+from sagemaker.dataset_definition.inputs import S3Input, DatasetDefinition
+from sagemaker.apiutils._base_types import ApiObject
 
 
 class Processor(object):
@@ -48,8 +55,9 @@ class Processor(object):
         tags=None,
         network_config=None,
     ):
-        """Initializes a ``Processor`` instance. The ``Processor`` handles Amazon
-        SageMaker Processing tasks.
+        """Initializes a ``Processor`` instance.
+
+        The ``Processor`` handles Amazon SageMaker Processing tasks.
 
         Args:
             role (str): An AWS IAM role name or ARN. Amazon SageMaker Processing
@@ -99,7 +107,6 @@ class Processor(object):
         self.output_kms_key = output_kms_key
         self.max_runtime_in_seconds = max_runtime_in_seconds
         self.base_job_name = base_job_name
-        self.sagemaker_session = sagemaker_session or Session()
         self.env = env
         self.tags = tags
         self.network_config = network_config
@@ -108,6 +115,12 @@ class Processor(object):
         self.latest_job = None
         self._current_job_name = None
         self.arguments = None
+
+        if self.instance_type in ("local", "local_gpu"):
+            if not isinstance(sagemaker_session, LocalSession):
+                sagemaker_session = LocalSession()
+
+        self.sagemaker_session = sagemaker_session or Session()
 
     def run(
         self,
@@ -118,6 +131,7 @@ class Processor(object):
         logs=True,
         job_name=None,
         experiment_config=None,
+        kms_key=None,
     ):
         """Runs a processing job.
 
@@ -138,6 +152,8 @@ class Processor(object):
             experiment_config (dict[str, str]): Experiment management configuration.
                 Dictionary contains three optional keys:
                 'ExperimentName', 'TrialName', and 'TrialComponentDisplayName'.
+            kms_key (str): The ARN of the KMS key that is used to encrypt the
+                user code file (default: None).
 
         Raises:
             ValueError: if ``logs`` is True but ``wait`` is False.
@@ -148,11 +164,13 @@ class Processor(object):
                 Please either set wait to True or set logs to False."""
             )
 
-        self._current_job_name = self._generate_current_job_name(job_name=job_name)
-
-        normalized_inputs = self._normalize_inputs(inputs)
-        normalized_outputs = self._normalize_outputs(outputs)
-        self.arguments = arguments
+        normalized_inputs, normalized_outputs = self._normalize_args(
+            job_name=job_name,
+            arguments=arguments,
+            inputs=inputs,
+            kms_key=kms_key,
+            outputs=outputs,
+        )
 
         self.latest_job = ProcessingJob.start_new(
             processor=self,
@@ -163,6 +181,62 @@ class Processor(object):
         self.jobs.append(self.latest_job)
         if wait:
             self.latest_job.wait(logs=logs)
+
+    def _extend_processing_args(self, inputs, outputs, **kwargs):  # pylint: disable=W0613
+        """Extend inputs and outputs based on extra parameters"""
+        return inputs, outputs
+
+    def _normalize_args(
+        self,
+        job_name=None,
+        arguments=None,
+        inputs=None,
+        outputs=None,
+        code=None,
+        kms_key=None,
+    ):
+        """Normalizes the arguments so that they can be passed to the job run
+
+        Args:
+            job_name (str): Name of the processing job to be created. If not specified, one
+                is generated, using the base name given to the constructor, if applicable
+                (default: None).
+            arguments (list[str]): A list of string arguments to be passed to a
+                processing job (default: None).
+            inputs (list[:class:`~sagemaker.processing.ProcessingInput`]): Input files for
+                the processing job. These must be provided as
+                :class:`~sagemaker.processing.ProcessingInput` objects (default: None).
+            kms_key (str): The ARN of the KMS key that is used to encrypt the
+                user code file (default: None).
+            outputs (list[:class:`~sagemaker.processing.ProcessingOutput`]): Outputs for
+                the processing job. These can be specified as either path strings or
+                :class:`~sagemaker.processing.ProcessingOutput` objects (default: None).
+            code (str): This can be an S3 URI or a local path to a file with the framework
+                script to run (default: None). A no op in the base class.
+        """
+        self._current_job_name = self._generate_current_job_name(job_name=job_name)
+
+        inputs_with_code = self._include_code_in_inputs(inputs, code)
+        normalized_inputs = self._normalize_inputs(inputs_with_code, kms_key)
+        normalized_outputs = self._normalize_outputs(outputs)
+        self.arguments = arguments
+
+        return normalized_inputs, normalized_outputs
+
+    def _include_code_in_inputs(self, inputs, _code):
+        """A no op in the base class to include code in the processing job inputs.
+
+        Args:
+            inputs (list[:class:`~sagemaker.processing.ProcessingInput`]): Input files for
+                the processing job. These must be provided as
+                :class:`~sagemaker.processing.ProcessingInput` objects.
+            _code (str): This can be an S3 URI or a local path to a file with the framework
+                script to run (default: None). A no op in the base class.
+
+        Returns:
+            list[:class:`~sagemaker.processing.ProcessingInput`]: inputs
+        """
+        return inputs
 
     def _generate_current_job_name(self, job_name=None):
         """Generates the job name before running a processing job.
@@ -185,13 +259,15 @@ class Processor(object):
 
         return name_from_base(base_name)
 
-    def _normalize_inputs(self, inputs=None):
+    def _normalize_inputs(self, inputs=None, kms_key=None):
         """Ensures that all the ``ProcessingInput`` objects have names and S3 URIs.
 
         Args:
             inputs (list[sagemaker.processing.ProcessingInput]): A list of ``ProcessingInput``
                 objects to be normalized (default: None). If not specified,
                 an empty list is returned.
+            kms_key (str): The ARN of the KMS key that is used to encrypt the
+                user code file (default: None).
 
         Returns:
             list[sagemaker.processing.ProcessingInput]: The list of normalized
@@ -210,27 +286,34 @@ class Processor(object):
                 # Generate a name for the ProcessingInput if it doesn't have one.
                 if file_input.input_name is None:
                     file_input.input_name = "input-{}".format(count)
+
+                if isinstance(file_input.source, Properties) or file_input.dataset_definition:
+                    normalized_inputs.append(file_input)
+                    continue
+
                 # If the source is a local path, upload it to S3
                 # and save the S3 uri in the ProcessingInput source.
-                parse_result = urlparse(file_input.source)
+                parse_result = urlparse(file_input.s3_input.s3_uri)
                 if parse_result.scheme != "s3":
-                    desired_s3_uri = "s3://{}/{}/input/{}".format(
+                    desired_s3_uri = s3.s3_path_join(
+                        "s3://",
                         self.sagemaker_session.default_bucket(),
                         self._current_job_name,
+                        "input",
                         file_input.input_name,
                     )
-                    s3_uri = S3Uploader.upload(
-                        local_path=file_input.source,
+                    s3_uri = s3.S3Uploader.upload(
+                        local_path=file_input.s3_input.s3_uri,
                         desired_s3_uri=desired_s3_uri,
-                        session=self.sagemaker_session,
+                        sagemaker_session=self.sagemaker_session,
+                        kms_key=kms_key,
                     )
-                    file_input.source = s3_uri
+                    file_input.s3_input.s3_uri = s3_uri
                 normalized_inputs.append(file_input)
         return normalized_inputs
 
     def _normalize_outputs(self, outputs=None):
-        """Ensures that all the outputs are ``ProcessingOutput`` objects with
-        names and S3 URIs.
+        """Ensures that all the outputs are ``ProcessingOutput`` objects with names and S3 URIs.
 
         Args:
             outputs (list[sagemaker.processing.ProcessingOutput]): A list
@@ -258,9 +341,11 @@ class Processor(object):
                 # If the output's destination is not an s3_uri, create one.
                 parse_result = urlparse(output.destination)
                 if parse_result.scheme != "s3":
-                    s3_uri = "s3://{}/{}/output/{}".format(
+                    s3_uri = s3.s3_path_join(
+                        "s3://",
                         self.sagemaker_session.default_bucket(),
                         self._current_job_name,
+                        "output",
                         output.output_name,
                     )
                     output.destination = s3_uri
@@ -288,8 +373,11 @@ class ScriptProcessor(Processor):
         tags=None,
         network_config=None,
     ):
-        """Initializes a ``ScriptProcessor`` instance. The ``ScriptProcessor``
-        handles Amazon SageMaker Processing tasks for jobs using a machine learning framework.
+        """Initializes a ``ScriptProcessor`` instance.
+
+        The ``ScriptProcessor`` handles Amazon SageMaker Processing tasks for jobs
+        using a machine learning framework, which allows for providing a script to be
+        run as part of the Processing Job.
 
         Args:
             role (str): An AWS IAM role name or ARN. Amazon SageMaker Processing
@@ -359,6 +447,7 @@ class ScriptProcessor(Processor):
         logs=True,
         job_name=None,
         experiment_config=None,
+        kms_key=None,
     ):
         """Runs a processing job.
 
@@ -381,19 +470,17 @@ class ScriptProcessor(Processor):
             experiment_config (dict[str, str]): Experiment management configuration.
                 Dictionary contains three optional keys:
                 'ExperimentName', 'TrialName', and 'TrialComponentDisplayName'.
+            kms_key (str): The ARN of the KMS key that is used to encrypt the
+                user code file (default: None).
         """
-        self._current_job_name = self._generate_current_job_name(job_name=job_name)
-
-        user_code_s3_uri = self._handle_user_code_url(code)
-        user_script_name = self._get_user_code_name(code)
-
-        inputs_with_code = self._convert_code_and_add_to_inputs(inputs, user_code_s3_uri)
-
-        self._set_entrypoint(self.command, user_script_name)
-
-        normalized_inputs = self._normalize_inputs(inputs_with_code)
-        normalized_outputs = self._normalize_outputs(outputs)
-        self.arguments = arguments
+        normalized_inputs, normalized_outputs = self._normalize_args(
+            job_name=job_name,
+            arguments=arguments,
+            inputs=inputs,
+            outputs=outputs,
+            code=code,
+            kms_key=kms_key,
+        )
 
         self.latest_job = ProcessingJob.start_new(
             processor=self,
@@ -404,6 +491,32 @@ class ScriptProcessor(Processor):
         self.jobs.append(self.latest_job)
         if wait:
             self.latest_job.wait(logs=logs)
+
+    def _include_code_in_inputs(self, inputs, code):
+        """Converts code to appropriate input and includes in input list.
+
+        Side effects include:
+            * uploads code to S3 if the code is a local file.
+            * sets the entrypoint attribute based on the command and user script name from code.
+
+        Args:
+            inputs (list[:class:`~sagemaker.processing.ProcessingInput`]): Input files for
+                the processing job. These must be provided as
+                :class:`~sagemaker.processing.ProcessingInput` objects.
+            code (str): This can be an S3 URI or a local path to a file with the framework
+                script to run (default: None).
+
+        Returns:
+            list[:class:`~sagemaker.processing.ProcessingInput`]: inputs together with the
+                code as `ProcessingInput`.
+        """
+        user_code_s3_uri = self._handle_user_code_url(code)
+        user_script_name = self._get_user_code_name(code)
+
+        inputs_with_code = self._convert_code_and_add_to_inputs(inputs, user_code_s3_uri)
+
+        self._set_entrypoint(self.command, user_script_name)
+        return inputs_with_code
 
     def _get_user_code_name(self, code):
         """Gets the basename of the user's code from the URL the customer provided.
@@ -439,21 +552,22 @@ class ScriptProcessor(Processor):
             user_code_s3_uri = code
         elif code_url.scheme == "" or code_url.scheme == "file":
             # Validate that the file exists locally and is not a directory.
-            if not os.path.exists(code):
+            code_path = url2pathname(code_url.path)
+            if not os.path.exists(code_path):
                 raise ValueError(
                     """code {} wasn't found. Please make sure that the file exists.
                     """.format(
                         code
                     )
                 )
-            if not os.path.isfile(code):
+            if not os.path.isfile(code_path):
                 raise ValueError(
                     """code {} must be a file, not a directory. Please pass a path to a file.
                     """.format(
                         code
                     )
                 )
-            user_code_s3_uri = self._upload_code(code)
+            user_code_s3_uri = self._upload_code(code_path)
         else:
             raise ValueError(
                 "code {} url scheme {} is not recognized. Please pass a file path or S3 url".format(
@@ -463,8 +577,7 @@ class ScriptProcessor(Processor):
         return user_code_s3_uri
 
     def _upload_code(self, code):
-        """Uploads a code file or directory specified as a string
-        and returns the S3 URI.
+        """Uploads a code file or directory specified as a string and returns the S3 URI.
 
         Args:
             code (str): A file or directory to be uploaded to S3.
@@ -473,13 +586,15 @@ class ScriptProcessor(Processor):
             str: The S3 URI of the uploaded file or directory.
 
         """
-        desired_s3_uri = "s3://{}/{}/input/{}".format(
+        desired_s3_uri = s3.s3_path_join(
+            "s3://",
             self.sagemaker_session.default_bucket(),
             self._current_job_name,
+            "input",
             self._CODE_CONTAINER_INPUT_NAME,
         )
-        return S3Uploader.upload(
-            local_path=code, desired_s3_uri=desired_s3_uri, session=self.sagemaker_session
+        return s3.S3Uploader.upload(
+            local_path=code, desired_s3_uri=desired_s3_uri, sagemaker_session=self.sagemaker_session
         )
 
     def _convert_code_and_add_to_inputs(self, inputs, s3_uri):
@@ -495,10 +610,13 @@ class ScriptProcessor(Processor):
                 with the ``ProcessingInput`` object created from ``s3_uri`` appended to the list.
 
         """
+
         code_file_input = ProcessingInput(
             source=s3_uri,
-            destination="{}{}".format(
-                self._CODE_CONTAINER_BASE_PATH, self._CODE_CONTAINER_INPUT_NAME
+            destination=str(
+                pathlib.PurePosixPath(
+                    self._CODE_CONTAINER_BASE_PATH, self._CODE_CONTAINER_INPUT_NAME
+                )
             ),
             input_name=self._CODE_CONTAINER_INPUT_NAME,
         )
@@ -510,8 +628,10 @@ class ScriptProcessor(Processor):
         Args:
             user_script_name (str): A filename with an extension.
         """
-        user_script_location = "{}{}/{}".format(
-            self._CODE_CONTAINER_BASE_PATH, self._CODE_CONTAINER_INPUT_NAME, user_script_name
+        user_script_location = str(
+            pathlib.PurePosixPath(
+                self._CODE_CONTAINER_BASE_PATH, self._CODE_CONTAINER_INPUT_NAME, user_script_name
+            )
         )
         self.entrypoint = command + [user_script_location]
 
@@ -558,11 +678,48 @@ class ProcessingJob(_Job):
             :class:`~sagemaker.processing.ProcessingJob`: The instance of ``ProcessingJob`` created
                 using the ``Processor``.
         """
+        process_args = cls._get_process_args(processor, inputs, outputs, experiment_config)
+
+        # Print the job name and the user's inputs and outputs as lists of dictionaries.
+        print()
+        print("Job Name: ", process_args["job_name"])
+        print("Inputs: ", process_args["inputs"])
+        print("Outputs: ", process_args["output_config"]["Outputs"])
+
+        # Call sagemaker_session.process using the arguments dictionary.
+        processor.sagemaker_session.process(**process_args)
+
+        return cls(
+            processor.sagemaker_session,
+            processor._current_job_name,
+            inputs,
+            outputs,
+            processor.output_kms_key,
+        )
+
+    @classmethod
+    def _get_process_args(cls, processor, inputs, outputs, experiment_config):
+        """Gets a dict of arguments for a new Amazon SageMaker processing job from the processor
+
+        Args:
+            processor (:class:`~sagemaker.processing.Processor`): The ``Processor`` instance
+                that started the job.
+            inputs (list[:class:`~sagemaker.processing.ProcessingInput`]): A list of
+                :class:`~sagemaker.processing.ProcessingInput` objects.
+            outputs (list[:class:`~sagemaker.processing.ProcessingOutput`]): A list of
+                :class:`~sagemaker.processing.ProcessingOutput` objects.
+            experiment_config (dict[str, str]): Experiment management configuration.
+                Dictionary contains three optional keys:
+                'ExperimentName', 'TrialName', and 'TrialComponentDisplayName'.
+
+        Returns:
+            Dict: dict for `sagemaker.session.Session.process` method
+        """
         # Initialize an empty dictionary for arguments to be passed to sagemaker_session.process.
         process_request_args = {}
 
         # Add arguments to the dictionary.
-        process_request_args["inputs"] = [input._to_request_dict() for input in inputs]
+        process_request_args["inputs"] = [inp._to_request_dict() for inp in inputs]
 
         process_request_args["output_config"] = {
             "Outputs": [output._to_request_dict() for output in outputs]
@@ -610,22 +767,7 @@ class ProcessingJob(_Job):
 
         process_request_args["tags"] = processor.tags
 
-        # Print the job name and the user's inputs and outputs as lists of dictionaries.
-        print()
-        print("Job Name: ", process_request_args["job_name"])
-        print("Inputs: ", process_request_args["inputs"])
-        print("Outputs: ", process_request_args["output_config"]["Outputs"])
-
-        # Call sagemaker_session.process using the arguments dictionary.
-        processor.sagemaker_session.process(**process_request_args)
-
-        return cls(
-            processor.sagemaker_session,
-            processor._current_job_name,
-            inputs,
-            outputs,
-            processor.output_kms_key,
-        )
+        return process_request_args
 
     @classmethod
     def from_processing_name(cls, sagemaker_session, processing_job_name):
@@ -648,15 +790,12 @@ class ProcessingJob(_Job):
         if job_desc.get("ProcessingInputs"):
             inputs = [
                 ProcessingInput(
-                    source=processing_input["S3Input"]["S3Uri"],
-                    destination=processing_input["S3Input"]["LocalPath"],
                     input_name=processing_input["InputName"],
-                    s3_data_type=processing_input["S3Input"].get("S3DataType"),
-                    s3_input_mode=processing_input["S3Input"].get("S3InputMode"),
-                    s3_data_distribution_type=processing_input["S3Input"].get(
-                        "S3DataDistributionType"
+                    s3_input=S3Input.from_boto(processing_input.get("S3Input")),
+                    dataset_definition=DatasetDefinition.from_boto(
+                        processing_input.get("DatasetDefinition")
                     ),
-                    s3_compression_type=processing_input["S3Input"].get("S3CompressionType"),
+                    app_managed=processing_input.get("AppManaged", False),
                 )
                 for processing_input in job_desc["ProcessingInputs"]
             ]
@@ -665,15 +804,21 @@ class ProcessingJob(_Job):
         if job_desc.get("ProcessingOutputConfig") and job_desc["ProcessingOutputConfig"].get(
             "Outputs"
         ):
-            outputs = [
-                ProcessingOutput(
-                    source=processing_output["S3Output"]["LocalPath"],
-                    destination=processing_output["S3Output"]["S3Uri"],
-                    output_name=processing_output["OutputName"],
+            outputs = []
+            for processing_output_dict in job_desc["ProcessingOutputConfig"]["Outputs"]:
+                processing_output = ProcessingOutput(
+                    output_name=processing_output_dict["OutputName"],
+                    app_managed=processing_output_dict.get("AppManaged", False),
+                    feature_store_output=FeatureStoreOutput.from_boto(
+                        processing_output_dict.get("FeatureStoreOutput")
+                    ),
                 )
-                for processing_output in job_desc["ProcessingOutputConfig"]["Outputs"]
-            ]
 
+                if "S3Output" in processing_output_dict:
+                    processing_output.source = processing_output_dict["S3Output"]["LocalPath"]
+                    processing_output.destination = processing_output_dict["S3Output"]["S3Uri"]
+
+                outputs.append(processing_output)
         output_kms_key = None
         if job_desc.get("ProcessingOutputConfig"):
             output_kms_key = job_desc["ProcessingOutputConfig"].get("KmsKeyId")
@@ -739,24 +884,117 @@ class ProcessingJob(_Job):
         """Stops the processing job."""
         self.sagemaker_session.stop_processing_job(self.name)
 
+    @staticmethod
+    def prepare_app_specification(container_arguments, container_entrypoint, image_uri):
+        """Prepares a dict that represents a ProcessingJob's AppSpecification.
+
+        Args:
+            container_arguments (list[str]): The arguments for a container
+                used to run a processing job.
+            container_entrypoint (list[str]): The entrypoint for a container
+                used to run a processing job.
+            image_uri (str): The container image to be run by the processing job.
+
+        Returns:
+            dict: Represents AppSpecification which configures the
+            processing job to run a specified Docker container image.
+        """
+        config = {"ImageUri": image_uri}
+        if container_arguments is not None:
+            config["ContainerArguments"] = container_arguments
+        if container_entrypoint is not None:
+            config["ContainerEntrypoint"] = container_entrypoint
+        return config
+
+    @staticmethod
+    def prepare_output_config(kms_key_id, outputs):
+        """Prepares a dict that represents a ProcessingOutputConfig.
+
+        Args:
+            kms_key_id (str): The AWS Key Management Service (AWS KMS) key that
+                Amazon SageMaker uses to encrypt the processing job output.
+                KmsKeyId can be an ID of a KMS key, ARN of a KMS key, alias of a KMS key,
+                or alias of a KMS key. The KmsKeyId is applied to all outputs.
+            outputs (list[dict]): Output configuration information for a processing job.
+
+        Returns:
+            dict: Represents output configuration for the processing job.
+        """
+        config = {"Outputs": outputs}
+        if kms_key_id is not None:
+            config["KmsKeyId"] = kms_key_id
+        return config
+
+    @staticmethod
+    def prepare_processing_resources(
+        instance_count, instance_type, volume_kms_key_id, volume_size_in_gb
+    ):
+        """Prepares a dict that represents the ProcessingResources.
+
+        Args:
+            instance_count (int): The number of ML compute instances
+                to use in the processing job. For distributed processing jobs,
+                specify a value greater than 1. The default value is 1.
+            instance_type (str): The ML compute instance type for the processing job.
+            volume_kms_key_id (str): The AWS Key Management Service (AWS KMS) key
+                that Amazon SageMaker uses to encrypt data on the storage
+                volume attached to the ML compute instance(s) that run the processing job.
+            volume_size_in_gb (int): The size of the ML storage volume in gigabytes
+                that you want to provision. You must specify sufficient
+                ML storage for your scenario.
+
+        Returns:
+            dict: Represents ProcessingResources which identifies the resources,
+                ML compute instances, and ML storage volumes to deploy
+                for a processing job.
+        """
+        processing_resources = {}
+        cluster_config = {
+            "InstanceCount": instance_count,
+            "InstanceType": instance_type,
+            "VolumeSizeInGB": volume_size_in_gb,
+        }
+        if volume_kms_key_id is not None:
+            cluster_config["VolumeKmsKeyId"] = volume_kms_key_id
+        processing_resources["ClusterConfig"] = cluster_config
+        return processing_resources
+
+    @staticmethod
+    def prepare_stopping_condition(max_runtime_in_seconds):
+        """Prepares a dict that represents the job's StoppingCondition.
+
+        Args:
+            max_runtime_in_seconds (int): Specifies the maximum runtime in seconds.
+
+        Returns:
+            dict
+        """
+        return {"MaxRuntimeInSeconds": max_runtime_in_seconds}
+
 
 class ProcessingInput(object):
-    """Accepts parameters that specify an Amazon S3 input for a processing job and
-    provides a method to turn those parameters into a dictionary."""
+    """Accepts parameters that specify an Amazon S3 input for a processing job.
+
+    Also provides a method to turn those parameters into a dictionary.
+    """
 
     def __init__(
         self,
-        source,
-        destination,
+        source=None,
+        destination=None,
         input_name=None,
         s3_data_type="S3Prefix",
         s3_input_mode="File",
         s3_data_distribution_type="FullyReplicated",
         s3_compression_type="None",
+        s3_input=None,
+        dataset_definition=None,
+        app_managed=False,
     ):
-        """Initializes a ``ProcessingInput`` instance. ``ProcessingInput`` accepts parameters
-        that specify an Amazon S3 input for a processing job and provides a method
-        to turn those parameters into a dictionary.
+        """Initializes a ``ProcessingInput`` instance.
+
+        ``ProcessingInput`` accepts parameters that specify an Amazon S3 input
+        for a processing job and provides a method to turn those parameters into a dictionary.
 
         Args:
             source (str): The source for the input. If a local path is provided, it will
@@ -770,6 +1008,11 @@ class ProcessingInput(object):
             s3_data_distribution_type (str): Valid options are "FullyReplicated"
                 or "ShardedByS3Key".
             s3_compression_type (str): Valid options are "None" or "Gzip".
+            s3_input (:class:`~sagemaker.dataset_definition.S3Input`)
+                Metadata of data objects stored in S3
+            dataset_definition (:class:`~sagemaker.dataset_definition.DatasetDefinition`)
+                DatasetDefinition input
+            app_managed (bool): Whether the input are managed by SageMaker or application
         """
         self.source = source
         self.destination = destination
@@ -778,39 +1021,80 @@ class ProcessingInput(object):
         self.s3_input_mode = s3_input_mode
         self.s3_data_distribution_type = s3_data_distribution_type
         self.s3_compression_type = s3_compression_type
+        self.s3_input = s3_input
+        self.dataset_definition = dataset_definition
+        self.app_managed = app_managed
+        self._create_s3_input()
 
     def _to_request_dict(self):
         """Generates a request dictionary using the parameters provided to the class."""
-        # Create the request dictionary.
-        s3_input_request = {
-            "InputName": self.input_name,
-            "S3Input": {
-                "S3Uri": self.source,
-                "LocalPath": self.destination,
-                "S3DataType": self.s3_data_type,
-                "S3InputMode": self.s3_input_mode,
-                "S3DataDistributionType": self.s3_data_distribution_type,
-            },
-        }
 
-        # Check the compression type, then add it to the dictionary.
-        if self.s3_compression_type == "Gzip" and self.s3_input_mode != "Pipe":
-            raise ValueError("Data can only be gzipped when the input mode is Pipe.")
-        if self.s3_compression_type is not None:
-            s3_input_request["S3Input"]["S3CompressionType"] = self.s3_compression_type
+        # Create the request dictionary.
+        s3_input_request = {"InputName": self.input_name, "AppManaged": self.app_managed}
+
+        if self.s3_input:
+            # Check the compression type, then add it to the dictionary.
+            if (
+                self.s3_input.s3_compression_type == "Gzip"
+                and self.s3_input.s3_input_mode != "Pipe"
+            ):
+                raise ValueError("Data can only be gzipped when the input mode is Pipe.")
+
+            s3_input_request["S3Input"] = S3Input.to_boto(self.s3_input)
+
+        if self.dataset_definition is not None:
+            s3_input_request["DatasetDefinition"] = DatasetDefinition.to_boto(
+                self.dataset_definition
+            )
 
         # Return the request dictionary.
         return s3_input_request
 
+    def _create_s3_input(self):
+        """Create and initialize S3Input.
+
+        When client provides S3Input, backfill other class memebers because they are used
+        in other places. When client provides other S3Input class memebers, create and
+        init S3Input.
+        """
+
+        if self.s3_input is not None:
+            # backfill other class members
+            self.source = self.s3_input.s3_uri
+            self.destination = self.s3_input.local_path
+            self.s3_data_type = self.s3_input.s3_data_type
+            self.s3_input_mode = self.s3_input.s3_input_mode
+            self.s3_data_distribution_type = self.s3_input.s3_data_distribution_type
+        elif self.source and self.destination:
+            self.s3_input = S3Input(
+                s3_uri=self.source,
+                local_path=self.destination,
+                s3_data_type=self.s3_data_type,
+                s3_input_mode=self.s3_input_mode,
+                s3_data_distribution_type=self.s3_data_distribution_type,
+                s3_compression_type=self.s3_compression_type,
+            )
+
 
 class ProcessingOutput(object):
-    """Accepts parameters that specify an Amazon S3 output for a processing job and provides
-    a method to turn those parameters into a dictionary."""
+    """Accepts parameters that specify an Amazon S3 output for a processing job.
 
-    def __init__(self, source, destination=None, output_name=None, s3_upload_mode="EndOfJob"):
-        """Initializes a ``ProcessingOutput`` instance. ``ProcessingOutput`` accepts parameters that
-        specify an Amazon S3 output for a processing job and provides a method to turn
-        those parameters into a dictionary.
+    It also provides a method to turn those parameters into a dictionary.
+    """
+
+    def __init__(
+        self,
+        source=None,
+        destination=None,
+        output_name=None,
+        s3_upload_mode="EndOfJob",
+        app_managed=False,
+        feature_store_output=None,
+    ):
+        """Initializes a ``ProcessingOutput`` instance.
+
+        ``ProcessingOutput`` accepts parameters that specify an Amazon S3 output for a
+        processing job and provides a method to turn those parameters into a dictionary.
 
         Args:
             source (str): The source for the output.
@@ -820,23 +1104,42 @@ class ProcessingOutput(object):
             output_name (str): The name of the output. If a name
                 is not provided, one will be generated (eg. "output-1").
             s3_upload_mode (str): Valid options are "EndOfJob" or "Continuous".
+            app_managed (bool): Whether the input are managed by SageMaker or application
+            feature_store_output (:class:`~sagemaker.processing.FeatureStoreOutput`)
+                Configuration for processing job outputs of FeatureStore.
         """
         self.source = source
         self.destination = destination
         self.output_name = output_name
         self.s3_upload_mode = s3_upload_mode
+        self.app_managed = app_managed
+        self.feature_store_output = feature_store_output
 
     def _to_request_dict(self):
         """Generates a request dictionary using the parameters provided to the class."""
         # Create the request dictionary.
         s3_output_request = {
             "OutputName": self.output_name,
-            "S3Output": {
+            "AppManaged": self.app_managed,
+        }
+
+        if self.source is not None:
+            s3_output_request["S3Output"] = {
                 "S3Uri": self.destination,
                 "LocalPath": self.source,
                 "S3UploadMode": self.s3_upload_mode,
-            },
-        }
+            }
+
+        if self.feature_store_output is not None:
+            s3_output_request["FeatureStoreOutput"] = FeatureStoreOutput.to_boto(
+                self.feature_store_output
+            )
 
         # Return the request dictionary.
         return s3_output_request
+
+
+class FeatureStoreOutput(ApiObject):
+    """Configuration for processing job outputs in Amazon SageMaker Feature Store."""
+
+    feature_group_name = None

@@ -13,17 +13,19 @@
 """Placeholder docstring"""
 from __future__ import absolute_import
 
-from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase, registry
+from sagemaker import image_uris
+from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase
 from sagemaker.amazon.hyperparameter import Hyperparameter as hp  # noqa
 from sagemaker.amazon.validation import ge, le, isin
-from sagemaker.predictor import RealTimePredictor
+from sagemaker.predictor import Predictor
 from sagemaker.model import Model
 from sagemaker.session import Session
 from sagemaker.vpc_utils import VPC_CONFIG_DEFAULT
 
 
 def _list_check_subset(valid_super_list):
-    """
+    """Provides a function to check validity of list subset.
+
     Args:
         valid_super_list:
     """
@@ -40,7 +42,12 @@ def _list_check_subset(valid_super_list):
 
 
 class Object2Vec(AmazonAlgorithmEstimatorBase):
-    """Placeholder docstring"""
+    """A general-purpose neural embedding algorithm that is highly customizable.
+
+    It can learn low-dimensional dense embeddings of high-dimensional objects. The embeddings
+    are learned in a way that preserves the semantics of the relationship between pairs of
+    objects in the original space in the embedding space.
+    """
 
     repo_name = "object2vec"
     repo_version = 1
@@ -133,11 +140,11 @@ class Object2Vec(AmazonAlgorithmEstimatorBase):
     def __init__(
         self,
         role,
-        train_instance_count,
-        train_instance_type,
-        epochs,
-        enc0_max_seq_len,
-        enc0_vocab_size,
+        instance_count=None,
+        instance_type=None,
+        epochs=None,
+        enc0_max_seq_len=None,
+        enc0_vocab_size=None,
         enc_dim=None,
         mini_batch_size=None,
         early_stopping_patience=None,
@@ -184,7 +191,7 @@ class Object2Vec(AmazonAlgorithmEstimatorBase):
         may be deployed to an Amazon SageMaker Endpoint by invoking
         :meth:`~sagemaker.amazon.estimator.EstimatorBase.deploy`. As well as
         deploying an Endpoint, deploy returns a
-        :class:`~sagemaker.amazon.RealTimePredictor` object that can be used for
+        :class:`~sagemaker.amazon.Predictor` object that can be used for
         inference calls using the trained model hosted in the SageMaker
         Endpoint.
 
@@ -201,9 +208,9 @@ class Object2Vec(AmazonAlgorithmEstimatorBase):
                 endpoints use this role to access training data and model
                 artifacts. After the endpoint is created, the inference code
                 might use the IAM role, if accessing AWS resource.
-            train_instance_count (int): Number of Amazon EC2 instances to use
+            instance_count (int): Number of Amazon EC2 instances to use
                 for training.
-            train_instance_type (str): Type of EC2 instance to use for training,
+            instance_type (str): Type of EC2 instance to use for training,
                 for example, 'ml.c4.xlarge'.
             epochs (int): Total number of epochs for SGD training
             enc0_max_seq_len (int): Maximum sequence length
@@ -263,8 +270,7 @@ class Object2Vec(AmazonAlgorithmEstimatorBase):
             :class:`~sagemaker.estimator.EstimatorBase`.
         """
 
-        super(Object2Vec, self).__init__(role, train_instance_count, train_instance_type, **kwargs)
-
+        super(Object2Vec, self).__init__(role, instance_count, instance_type, **kwargs)
         self.enc_dim = enc_dim
         self.mini_batch_size = mini_batch_size
         self.epochs = epochs
@@ -302,8 +308,9 @@ class Object2Vec(AmazonAlgorithmEstimatorBase):
         self.enc1_freeze_pretrained_embedding = enc1_freeze_pretrained_embedding
 
     def create_model(self, vpc_config_override=VPC_CONFIG_DEFAULT, **kwargs):
-        """Return a :class:`~sagemaker.amazon.Object2VecModel` referencing the
-        latest s3 model data produced by this Estimator.
+        """Return a :class:`~sagemaker.amazon.Object2VecModel`.
+
+        It references the latest s3 model data produced by this Estimator.
 
         Args:
             vpc_config_override (dict[str, list[str]]): Optional override for VpcConfig set on
@@ -321,12 +328,7 @@ class Object2Vec(AmazonAlgorithmEstimatorBase):
         )
 
     def _prepare_for_training(self, records, mini_batch_size=None, job_name=None):
-        """
-        Args:
-            records:
-            mini_batch_size:
-            job_name:
-        """
+        """Placeholder docstring"""
         if mini_batch_size is None:
             mini_batch_size = self.MINI_BATCH_SIZE
 
@@ -336,29 +338,41 @@ class Object2Vec(AmazonAlgorithmEstimatorBase):
 
 
 class Object2VecModel(Model):
-    """Reference Object2Vec s3 model data. Calling
-    :meth:`~sagemaker.model.Model.deploy` creates an Endpoint and returns a
+    """Reference Object2Vec s3 model data.
+
+    Calling :meth:`~sagemaker.model.Model.deploy` creates an Endpoint and returns a
     Predictor that calculates anomaly scores for datapoints.
     """
 
     def __init__(self, model_data, role, sagemaker_session=None, **kwargs):
-        """
+        """Initialization for Object2VecModel class.
+
         Args:
-            model_data:
-            role:
-            sagemaker_session:
-            **kwargs:
+            model_data (str): The S3 location of a SageMaker model data
+                ``.tar.gz`` file.
+            role (str): An AWS IAM role (either name or full ARN). The Amazon
+                SageMaker training jobs and APIs that create Amazon SageMaker
+                endpoints use this role to access training data and model
+                artifacts. After the endpoint is created, the inference code
+                might use the IAM role, if it needs to access an AWS resource.
+            sagemaker_session (sagemaker.session.Session): Session object which
+                manages interactions with Amazon SageMaker APIs and any other
+                AWS services needed. If not specified, the estimator creates one
+                using the default AWS configuration chain.
+            **kwargs: Keyword arguments passed to the ``FrameworkModel``
+                initializer.
         """
         sagemaker_session = sagemaker_session or Session()
-        repo = "{}:{}".format(Object2Vec.repo_name, Object2Vec.repo_version)
-        image = "{}/{}".format(
-            registry(sagemaker_session.boto_session.region_name, Object2Vec.repo_name), repo
+        image_uri = image_uris.retrieve(
+            Object2Vec.repo_name,
+            sagemaker_session.boto_region_name,
+            version=Object2Vec.repo_version,
         )
         super(Object2VecModel, self).__init__(
+            image_uri,
             model_data,
-            image,
             role,
-            predictor_cls=RealTimePredictor,
+            predictor_cls=Predictor,
             sagemaker_session=sagemaker_session,
             **kwargs
         )

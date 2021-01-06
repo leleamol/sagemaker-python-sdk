@@ -19,15 +19,18 @@ import shutil
 from distutils.dir_util import copy_tree
 from six.moves.urllib.parse import urlparse
 
+from sagemaker import s3
+
 
 def copy_directory_structure(destination_directory, relative_path):
-    """Create all the intermediate directories required for relative_path to
+    """Creates intermediate directory structure for relative_path.
+
+    Create all the intermediate directories required for relative_path to
     exist within destination_directory. This assumes that relative_path is a
     directory located within root_dir.
 
     Examples:
         destination_directory: /tmp/destination relative_path: test/unit/
-
         will create: /tmp/destination/test/unit
 
     Args:
@@ -44,7 +47,9 @@ def copy_directory_structure(destination_directory, relative_path):
 
 
 def move_to_destination(source, destination, job_name, sagemaker_session):
-    """move source to destination. Can handle uploading to S3
+    """Move source to destination.
+
+    Can handle uploading to S3.
 
     Args:
         source (str): root directory to move
@@ -62,8 +67,8 @@ def move_to_destination(source, destination, job_name, sagemaker_session):
         final_uri = destination
     elif parsed_uri.scheme == "s3":
         bucket = parsed_uri.netloc
-        path = _create_s3_prefix(parsed_uri.path, job_name)
-        final_uri = "s3://%s/%s" % (bucket, path)
+        path = s3.s3_path_join(parsed_uri.path, job_name)
+        final_uri = s3.s3_path_join("s3://", bucket, path)
         sagemaker_session.upload_data(source, bucket, path)
     else:
         raise ValueError("Invalid destination URI, must be s3:// or file://, got: %s" % destination)
@@ -72,25 +77,10 @@ def move_to_destination(source, destination, job_name, sagemaker_session):
     return final_uri
 
 
-def _create_s3_prefix(path, job_name):
-    """Constructs a path out of the given path and job name to be
-    used as an S3 prefix.
-
-    Args:
-        path (str): the original path. If the path is only ``"/"``,
-            then it is ignored.
-        job_name (str): the job name to be appended to the path.
-
-    Returns:
-        str: an S3 prefix of the form ``"path/job_name"``
-    """
-    path = path.strip("/")
-    return job_name if path == "" else "/".join((path, job_name))
-
-
 def recursive_copy(source, destination):
-    """A wrapper around distutils.dir_util.copy_tree but won't throw any
-    exception when the source directory does not exist.
+    """A wrapper around distutils.dir_util.copy_tree.
+
+    This won't throw any exception when the source directory does not exist.
 
     Args:
         source (str): source path

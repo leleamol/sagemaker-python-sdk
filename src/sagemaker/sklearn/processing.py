@@ -10,23 +10,20 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
-"""This module contains code related to SKLearn Processors, which are used
-for Processing jobs. These jobs let customers perform data pre-processing,
-post-processing, feature engineering, data validation, and model evaluation
-and interpretation on SageMaker.
+"""This module contains code related to SKLearn Processors which are used for Processing jobs.
+
+These jobs let customers perform data pre-processing, post-processing, feature engineering,
+data validation, and model evaluation and interpretation on SageMaker.
 """
 from __future__ import absolute_import
 
-from sagemaker.fw_registry import default_framework_uri
-
-from sagemaker import Session
+from sagemaker import image_uris, Session
 from sagemaker.processing import ScriptProcessor
+from sagemaker.sklearn import defaults
 
 
 class SKLearnProcessor(ScriptProcessor):
     """Handles Amazon SageMaker processing tasks for jobs using scikit-learn."""
-
-    _valid_framework_versions = ["0.20.0"]
 
     def __init__(
         self,
@@ -45,8 +42,9 @@ class SKLearnProcessor(ScriptProcessor):
         tags=None,
         network_config=None,
     ):
-        """Initialize an ``SKLearnProcessor`` instance. The SKLearnProcessor
-        handles Amazon SageMaker processing tasks for jobs using scikit-learn.
+        """Initialize an ``SKLearnProcessor`` instance.
+
+        The SKLearnProcessor handles Amazon SageMaker processing tasks for jobs using scikit-learn.
 
         Args:
             framework_version (str): The version of scikit-learn.
@@ -83,21 +81,15 @@ class SKLearnProcessor(ScriptProcessor):
                 object that configures network isolation, encryption of
                 inter-container traffic, security group IDs, and subnets.
         """
-        session = sagemaker_session or Session()
-        region = session.boto_region_name
-
-        if framework_version not in self._valid_framework_versions:
-            raise ValueError(
-                "scikit-learn version {} is not supported. Supported versions are {}".format(
-                    framework_version, self._valid_framework_versions
-                )
-            )
-
         if not command:
             command = ["python3"]
 
-        image_tag = "{}-{}-{}".format(framework_version, "cpu", "py3")
-        image_uri = default_framework_uri("scikit-learn", region, image_tag)
+        session = sagemaker_session or Session()
+        region = session.boto_region_name
+
+        image_uri = image_uris.retrieve(
+            defaults.SKLEARN_NAME, region, version=framework_version, instance_type=instance_type
+        )
 
         super(SKLearnProcessor, self).__init__(
             role=role,

@@ -17,12 +17,15 @@ import json
 
 
 class Hyperparameter(object):
-    """An algorithm hyperparameter with optional validation. Implemented as a
-    python descriptor object.
+    """An algorithm hyperparameter with optional validation.
+
+    Implemented as a python descriptor object.
     """
 
     def __init__(self, name, validate=lambda _: True, validation_message="", data_type=str):
-        """Args: name (str): The name of this hyperparameter validate
+        """Args:
+
+        name (str): The name of this hyperparameter validate
         (callable[object]->[bool]): A validation function or list of validation
         functions.
 
@@ -48,10 +51,7 @@ class Hyperparameter(object):
             self.validation = [self.validation]
 
     def validate(self, value):
-        """
-        Args:
-            value:
-        """
+        """Placeholder docstring"""
         if value is None:  # We allow assignment from None, but Nones are not sent to training.
             return
 
@@ -63,11 +63,7 @@ class Hyperparameter(object):
                 raise ValueError(error_message)
 
     def __get__(self, obj, objtype):
-        """
-        Args:
-            obj:
-            objtype:
-        """
+        """Placeholder docstring"""
         if "_hyperparameters" not in dir(obj) or self.name not in obj._hyperparameters:
             raise AttributeError()
         return obj._hyperparameters[self.name]
@@ -95,8 +91,7 @@ class Hyperparameter(object):
 
     @staticmethod
     def serialize_all(obj):
-        """Return all non-None ``hyperparameter`` values on ``obj`` as a
-        ``dict[str,str].``
+        """Return all non-None ``hyperparameter`` values on ``obj`` as a ``dict[str,str].``
 
         Args:
             obj:

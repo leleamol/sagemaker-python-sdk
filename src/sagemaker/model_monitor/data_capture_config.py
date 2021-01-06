@@ -10,14 +10,14 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
-"""This module contains code related to the DataCaptureConfig class, which is used
-for configuring capture, collection, and storage, for prediction requests and responses
-for models hosted on SageMaker Endpoints.
+"""This module contains code related to the DataCaptureConfig class.
+
+Codes are used for configuring capture, collection, and storage, for prediction requests and
+responses for models hosted on SageMaker Endpoints.
 """
 from __future__ import print_function, absolute_import
 
-import os
-
+from sagemaker import s3
 from sagemaker.session import Session
 
 _MODEL_MONITOR_S3_PATH = "model-monitor"
@@ -26,6 +26,7 @@ _DATA_CAPTURE_S3_PATH = "data-capture"
 
 class DataCaptureConfig(object):
     """Configuration object passed in when deploying models to Amazon SageMaker Endpoints.
+
     This object specifies configuration related to endpoint data capture for use with
     Amazon SageMaker Model Monitoring.
     """
@@ -67,7 +68,7 @@ class DataCaptureConfig(object):
         self.destination_s3_uri = destination_s3_uri
         if self.destination_s3_uri is None:
             sagemaker_session = sagemaker_session or Session()
-            self.destination_s3_uri = os.path.join(
+            self.destination_s3_uri = s3.s3_path_join(
                 "s3://",
                 sagemaker_session.default_bucket(),
                 _MODEL_MONITOR_S3_PATH,

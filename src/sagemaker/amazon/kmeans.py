@@ -13,18 +13,24 @@
 """Placeholder docstring"""
 from __future__ import absolute_import
 
-from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase, registry
-from sagemaker.amazon.common import numpy_to_record_serializer, record_deserializer
+from sagemaker import image_uris
+from sagemaker.amazon.amazon_estimator import AmazonAlgorithmEstimatorBase
+from sagemaker.amazon.common import RecordSerializer, RecordDeserializer
 from sagemaker.amazon.hyperparameter import Hyperparameter as hp  # noqa
 from sagemaker.amazon.validation import gt, isin, ge, le
-from sagemaker.predictor import RealTimePredictor
+from sagemaker.predictor import Predictor
 from sagemaker.model import Model
 from sagemaker.session import Session
 from sagemaker.vpc_utils import VPC_CONFIG_DEFAULT
 
 
 class KMeans(AmazonAlgorithmEstimatorBase):
-    """Placeholder docstring"""
+    """An unsupervised learning algorithm that attempts to find discrete groupings within data.
+
+    As the result of KMeans, members of a group are as similar as possible to one another and as
+    different as possible from members of other groups. You define the attributes that you want
+    the algorithm to use to determine similarity.
+    """
 
     repo_name = "kmeans"
     repo_version = 1
@@ -51,9 +57,9 @@ class KMeans(AmazonAlgorithmEstimatorBase):
     def __init__(
         self,
         role,
-        train_instance_count,
-        train_instance_type,
-        k,
+        instance_count=None,
+        instance_type=None,
+        k=None,
         init_method=None,
         max_iterations=None,
         tol=None,
@@ -65,9 +71,9 @@ class KMeans(AmazonAlgorithmEstimatorBase):
         eval_metrics=None,
         **kwargs
     ):
-        """A k-means clustering
-        :class:`~sagemaker.amazon.AmazonAlgorithmEstimatorBase`. Finds k
-        clusters of data in an unlabeled dataset.
+        """A k-means clustering class :class:`~sagemaker.amazon.AmazonAlgorithmEstimatorBase`.
+
+        Finds k clusters of data in an unlabeled dataset.
 
         This Estimator may be fit via calls to
         :meth:`~sagemaker.amazon.amazon_estimator.AmazonAlgorithmEstimatorBase.fit_ndarray`
@@ -103,9 +109,9 @@ class KMeans(AmazonAlgorithmEstimatorBase):
                 endpoints use this role to access training data and model
                 artifacts. After the endpoint is created, the inference code
                 might use the IAM role, if accessing AWS resource.
-            train_instance_count (int): Number of Amazon EC2 instances to use
+            instance_count (int): Number of Amazon EC2 instances to use
                 for training.
-            train_instance_type (str): Type of EC2 instance to use for training,
+            instance_type (str): Type of EC2 instance to use for training,
                 for example, 'ml.c4.xlarge'.
             k (int): The number of clusters to produce.
             init_method (str): How to initialize cluster locations. One of
@@ -142,7 +148,7 @@ class KMeans(AmazonAlgorithmEstimatorBase):
             :class:`~sagemaker.estimator.amazon_estimator.AmazonAlgorithmEstimatorBase` and
             :class:`~sagemaker.estimator.EstimatorBase`.
         """
-        super(KMeans, self).__init__(role, train_instance_count, train_instance_type, **kwargs)
+        super(KMeans, self).__init__(role, instance_count, instance_type, **kwargs)
         self.k = k
         self.init_method = init_method
         self.max_iterations = max_iterations
@@ -155,8 +161,9 @@ class KMeans(AmazonAlgorithmEstimatorBase):
         self.eval_metrics = eval_metrics
 
     def create_model(self, vpc_config_override=VPC_CONFIG_DEFAULT, **kwargs):
-        """Return a :class:`~sagemaker.amazon.kmeans.KMeansModel` referencing
-        the latest s3 model data produced by this Estimator.
+        """Return a :class:`~sagemaker.amazon.kmeans.KMeansModel`.
+
+        It references the latest s3 model data produced by this Estimator.
 
         Args:
             vpc_config_override (dict[str, list[str]]): Optional override for
@@ -175,74 +182,97 @@ class KMeans(AmazonAlgorithmEstimatorBase):
         )
 
     def _prepare_for_training(self, records, mini_batch_size=5000, job_name=None):
-        """
-        Args:
-            records:
-            mini_batch_size:
-            job_name:
-        """
+        """Placeholder docstring"""
         super(KMeans, self)._prepare_for_training(
             records, mini_batch_size=mini_batch_size, job_name=job_name
         )
 
     def hyperparameters(self):
-        """Return the SageMaker hyperparameters for training this KMeans
-        Estimator
-        """
+        """Return the SageMaker hyperparameters for training this KMeans Estimator."""
         hp_dict = dict(force_dense="True")  # KMeans requires this hp to fit on Record objects
         hp_dict.update(super(KMeans, self).hyperparameters())
         return hp_dict
 
 
-class KMeansPredictor(RealTimePredictor):
+class KMeansPredictor(Predictor):
     """Assigns input vectors to their closest cluster in a KMeans model.
 
     The implementation of
-    :meth:`~sagemaker.predictor.RealTimePredictor.predict` in this
-    `RealTimePredictor` requires a numpy ``ndarray`` as input. The array should
+    :meth:`~sagemaker.predictor.Predictor.predict` in this
+    `Predictor` requires a numpy ``ndarray`` as input. The array should
     contain the same number of columns as the feature-dimension of the data used
     to fit the model this Predictor performs inference on.
 
     ``predict()`` returns a list of
-    :class:`~sagemaker.amazon.record_pb2.Record` objects, one for each row in
+    :class:`~sagemaker.amazon.record_pb2.Record` objects (assuming the default
+    recordio-protobuf ``deserializer`` is used), one for each row in
     the input ``ndarray``. The nearest cluster is stored in the
     ``closest_cluster`` key of the ``Record.label`` field.
     """
 
-    def __init__(self, endpoint, sagemaker_session=None):
-        """
+    def __init__(
+        self,
+        endpoint_name,
+        sagemaker_session=None,
+        serializer=RecordSerializer(),
+        deserializer=RecordDeserializer(),
+    ):
+        """Initialization for KMeansPredictor class.
+
         Args:
-            endpoint:
-            sagemaker_session:
+            endpoint_name (str): Name of the Amazon SageMaker endpoint to which
+                requests are sent.
+            sagemaker_session (sagemaker.session.Session): A SageMaker Session
+                object, used for SageMaker interactions (default: None). If not
+                specified, one is created using the default AWS configuration
+                chain.
+            serializer (sagemaker.serializers.BaseSerializer): Optional. Default
+                serializes input data to x-recordio-protobuf format.
+            deserializer (sagemaker.deserializers.BaseDeserializer): Optional.
+                Default parses responses from x-recordio-protobuf format.
         """
         super(KMeansPredictor, self).__init__(
-            endpoint,
+            endpoint_name,
             sagemaker_session,
-            serializer=numpy_to_record_serializer(),
-            deserializer=record_deserializer(),
+            serializer=serializer,
+            deserializer=deserializer,
         )
 
 
 class KMeansModel(Model):
-    """Reference KMeans s3 model data. Calling
-    :meth:`~sagemaker.model.Model.deploy` creates an Endpoint and return a
+    """Reference KMeans s3 model data.
+
+    Calling :meth:`~sagemaker.model.Model.deploy` creates an Endpoint and return a
     Predictor to performs k-means cluster assignment.
     """
 
     def __init__(self, model_data, role, sagemaker_session=None, **kwargs):
-        """
+        """Initialization for KMeansModel class.
+
         Args:
-            model_data:
-            role:
-            sagemaker_session:
-            **kwargs:
+            model_data (str): The S3 location of a SageMaker model data
+                ``.tar.gz`` file.
+            role (str): An AWS IAM role (either name or full ARN). The Amazon
+                SageMaker training jobs and APIs that create Amazon SageMaker
+                endpoints use this role to access training data and model
+                artifacts. After the endpoint is created, the inference code
+                might use the IAM role, if it needs to access an AWS resource.
+            sagemaker_session (sagemaker.session.Session): Session object which
+                manages interactions with Amazon SageMaker APIs and any other
+                AWS services needed. If not specified, the estimator creates one
+                using the default AWS configuration chain.
+            **kwargs: Keyword arguments passed to the ``FrameworkModel``
+                initializer.
         """
         sagemaker_session = sagemaker_session or Session()
-        repo = "{}:{}".format(KMeans.repo_name, KMeans.repo_version)
-        image = "{}/{}".format(registry(sagemaker_session.boto_session.region_name), repo)
+        image_uri = image_uris.retrieve(
+            KMeans.repo_name,
+            sagemaker_session.boto_region_name,
+            version=KMeans.repo_version,
+        )
         super(KMeansModel, self).__init__(
+            image_uri,
             model_data,
-            image,
             role,
             predictor_cls=KMeansPredictor,
             sagemaker_session=sagemaker_session,
